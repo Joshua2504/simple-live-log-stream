@@ -5,7 +5,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node server.js"
+    "dev": "node server.js",
+    "test:multi-client": "node test-multi-client.js"
   },
   "dependencies": {
     "ws": "^8.18.0"

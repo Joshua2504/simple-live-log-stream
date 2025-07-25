@@ -98,6 +98,189 @@ const server = http.createServer((req, res) => {
   }
 });
 
+// Global state for managing single log tail process and multiple clients
+class LogBroadcaster {
+  constructor() {
+    this.clients = new Set();
+    this.tail = null;
+    this.messageBuffer = [];
+    this.bufferTimeout = null;
+    this.isStarted = false;
+    this.BUFFER_SIZE = 5;
+    this.BUFFER_DELAY = 100; // ms
+  }
+
+  addClient(ws, clientInfo) {
+    this.clients.add({ ws, clientInfo, messagesSent: 0, totalBytesSent: 0 });
+    
+    Logger.info('Client added to broadcaster', {
+      ...clientInfo,
+      totalClients: this.clients.size
+    });
+
+    // Tail process is always running, no need to start it here
+  }
+
+  removeClient(ws, clientInfo) {
+    // Find and remove the client
+    for (const client of this.clients) {
+      if (client.ws === ws) {
+        const sessionStats = {
+          totalMessagesSent: client.messagesSent,
+          totalBytesSent: client.totalBytesSent,
+          sessionDuration: Date.now() - new Date(clientInfo.connectionTime).getTime()
+        };
+
+        Logger.info('Client removed from broadcaster', {
+          ...clientInfo,
+          ...sessionStats,
+          remainingClients: this.clients.size - 1
+        });
+
+        this.clients.delete(client);
+        break;
+      }
+    }
+
+    // Keep the tail process running even if no clients remain
+    // The process will be stopped only on server shutdown
+  }
+
+  startTailProcess() {
+    if (this.isStarted) return;
+
+    this.tail = spawn('bash', ['-c',
+      `find /mnt/vhosts/*/logs/ -type f ! -name "*.gz" -exec tail -f -n 0 {} + | ts '[%Y-%m-%d %H:%M:%S]'`
+    ]);
+
+    this.isStarted = true;
+
+    Logger.info('Global log tail process started', { 
+      command: 'tail -f -n 0 with find (live logs only)',
+      pid: this.tail.pid,
+      clientCount: this.clients.size
+    });
+
+    this.tail.stdout.on('data', (data) => {
+      const logData = data.toString().trim();
+      if (!logData) return;
+      
+      Logger.debug('Raw log data received for broadcast', { 
+        dataLength: logData.length,
+        pid: this.tail.pid,
+        activeClients: this.clients.size
+      });
+      
+      // Add to buffer instead of sending immediately
+      this.messageBuffer.push(logData);
+      
+      // Send buffer when it's full or after timeout
+      if (this.messageBuffer.length >= this.BUFFER_SIZE) {
+        clearTimeout(this.bufferTimeout);
+        this.broadcastBufferedMessages();
+      } else if (!this.bufferTimeout) {
+        this.bufferTimeout = setTimeout(() => this.broadcastBufferedMessages(), this.BUFFER_DELAY);
+      }
+    });
+
+    this.tail.stderr.on('data', (data) => {
+      Logger.error('Global log stream error from tail process', { 
+        error: data.toString(),
+        pid: this.tail.pid,
+        clientCount: this.clients.size
+      });
+    });
+
+    this.tail.on('close', (code, signal) => {
+      Logger.warn('Global log tail process closed', { 
+        code, 
+        signal, 
+        pid: this.tail.pid,
+        clientCount: this.clients.size
+      });
+      this.isStarted = false;
+    });
+
+    this.tail.on('error', (error) => {
+      Logger.error('Global log tail process error', { 
+        error: error.message,
+        pid: this.tail.pid,
+        clientCount: this.clients.size
+      });
+      this.isStarted = false;
+    });
+  }
+
+  stopTailProcess() {
+    if (!this.isStarted || !this.tail) return;
+
+    clearTimeout(this.bufferTimeout);
+    this.bufferTimeout = null;
+
+    if (!this.tail.killed) {
+      this.tail.kill();
+      Logger.info('Global tail process stopped - no clients remaining', { 
+        pid: this.tail.pid 
+      });
+    }
+
+    this.isStarted = false;
+    this.tail = null;
+    this.messageBuffer = [];
+  }
+
+  broadcastBufferedMessages() {
+    if (this.messageBuffer.length === 0) {
+      this.bufferTimeout = null;
+      return;
+    }
+
+    const batchedData = this.messageBuffer.join('\n');
+    const obfuscatedData = obfuscateIPAddresses(batchedData);
+    const dataSize = Buffer.byteLength(obfuscatedData, 'utf8');
+    
+    let successfulSends = 0;
+    let failedSends = 0;
+
+    // Broadcast to all connected clients
+    for (const client of this.clients) {
+      if (client.ws.readyState === WebSocket.OPEN) {
+        try {
+          client.ws.send(obfuscatedData);
+          client.messagesSent += this.messageBuffer.length;
+          client.totalBytesSent += dataSize;
+          successfulSends++;
+        } catch (error) {
+          Logger.error('Failed to send to client', {
+            error: error.message,
+            clientAddress: client.clientInfo.remoteAddress
+          });
+          failedSends++;
+        }
+      } else {
+        // Client connection is closed, will be cleaned up elsewhere
+        failedSends++;
+      }
+    }
+
+    // Enhanced logging with broadcast metrics
+    Logger.debug('Log batch broadcast to clients', {
+      linesInBatch: this.messageBuffer.length,
+      batchSizeBytes: dataSize,
+      totalClients: this.clients.size,
+      successfulSends,
+      failedSends,
+      tailPid: this.tail ? this.tail.pid : 'null'
+    });
+    
+    this.messageBuffer = [];
+    this.bufferTimeout = null;
+  }
+}
+
+// Create global broadcaster instance
+const logBroadcaster = new LogBroadcaster();
+
 const wss = new WebSocket.Server({ 
   server,
   perMessageDeflate: {
@@ -117,109 +300,18 @@ wss.on('connection', function connection(ws, req) {
   
   Logger.info('WebSocket client connected', clientInfo);
 
-  let messageBuffer = [];
-  let bufferTimeout = null;
-  let messagesSent = 0;
-  let totalBytesSent = 0;
-  const BUFFER_SIZE = 5;
-  const BUFFER_DELAY = 100; // ms
-
-  const tail = spawn('bash', ['-c',
-    `find /mnt/vhosts/*/logs/ -type f ! -name "*.gz" -exec tail -f -n 0 {} + | ts '[%Y-%m-%d %H:%M:%S]'`
-  ]);
-
-  Logger.info('Log tail process started', { 
-    command: 'tail -f -n 0 with find (live logs only)',
-    pid: tail.pid 
-  });
-
-  function sendBufferedMessages() {
-    if (messageBuffer.length > 0 && ws.readyState === WebSocket.OPEN) {
-      const batchedData = messageBuffer.join('\n');
-      const obfuscatedData = obfuscateIPAddresses(batchedData);
-      const dataSize = Buffer.byteLength(obfuscatedData, 'utf8');
-      
-      ws.send(obfuscatedData);
-      
-      messagesSent += messageBuffer.length;
-      totalBytesSent += dataSize;
-      
-      // Enhanced logging with metrics
-      Logger.debug('Log batch sent to client', {
-        linesInBatch: messageBuffer.length,
-        batchSizeBytes: dataSize,
-        totalMessagesSent: messagesSent,
-        totalBytesSent: totalBytesSent,
-        clientAddress: clientInfo.remoteAddress
-      });
-      
-      messageBuffer = [];
-    }
-    bufferTimeout = null;
-  }
-
-  tail.stdout.on('data', (data) => {
-    const logData = data.toString().trim();
-    if (!logData) return;
-    
-    Logger.debug('Raw log data received', { 
-      dataLength: logData.length,
-      pid: tail.pid 
-    });
-    
-    // Add to buffer instead of sending immediately
-    messageBuffer.push(logData);
-    
-    // Send buffer when it's full or after timeout
-    if (messageBuffer.length >= BUFFER_SIZE) {
-      clearTimeout(bufferTimeout);
-      sendBufferedMessages();
-    } else if (!bufferTimeout) {
-      bufferTimeout = setTimeout(sendBufferedMessages, BUFFER_DELAY);
-    }
-  });
-
-  tail.stderr.on('data', (data) => {
-    Logger.error('Log stream error from tail process', { 
-      error: data.toString(),
-      pid: tail.pid 
-    });
-  });
-
-  tail.on('close', (code, signal) => {
-    Logger.warn('Log tail process closed', { 
-      code, 
-      signal, 
-      pid: tail.pid 
-    });
-  });
-
-  tail.on('error', (error) => {
-    Logger.error('Log tail process error', { 
-      error: error.message,
-      pid: tail.pid 
-    });
-  });
+  // Add client to the global broadcaster
+  logBroadcaster.addClient(ws, clientInfo);
 
   ws.on('close', (code, reason) => {
-    const sessionStats = {
-      totalMessagesSent: messagesSent,
-      totalBytesSent: totalBytesSent,
-      sessionDuration: Date.now() - new Date(clientInfo.connectionTime).getTime(),
-      closeCode: code,
-      closeReason: reason
-    };
-    
     Logger.info('WebSocket client disconnected', {
       ...clientInfo,
-      ...sessionStats
+      closeCode: code,
+      closeReason: reason
     });
     
-    clearTimeout(bufferTimeout);
-    if (tail && !tail.killed) {
-      tail.kill();
-      Logger.debug('Tail process killed for disconnected client', { pid: tail.pid });
-    }
+    // Remove client from broadcaster
+    logBroadcaster.removeClient(ws, clientInfo);
   });
 
   ws.on('error', (error) => {
@@ -229,11 +321,8 @@ wss.on('connection', function connection(ws, req) {
       errorCode: error.code
     });
     
-    clearTimeout(bufferTimeout);
-    if (tail && !tail.killed) {
-      tail.kill();
-      Logger.debug('Tail process killed due to WebSocket error', { pid: tail.pid });
-    }
+    // Remove client from broadcaster
+    logBroadcaster.removeClient(ws, clientInfo);
   });
 });
 
@@ -242,6 +331,10 @@ const PORT = 9123;
 // Handle process termination gracefully
 process.on('SIGTERM', () => {
   Logger.info('Received SIGTERM, shutting down gracefully');
+  
+  // Stop the global tail process
+  logBroadcaster.stopTailProcess();
+  
   server.close(() => {
     Logger.info('HTTP server closed');
     process.exit(0);
@@ -250,6 +343,10 @@ process.on('SIGTERM', () => {
 
 process.on('SIGINT', () => {
   Logger.info('Received SIGINT, shutting down gracefully');
+  
+  // Stop the global tail process
+  logBroadcaster.stopTailProcess();
+  
   server.close(() => {
     Logger.info('HTTP server closed');
     process.exit(0);
@@ -262,6 +359,42 @@ server.listen(PORT, () => {
     nodeVersion: process.version,
     platform: process.platform,
     pid: process.pid,
-    url: `http://localhost:${PORT}`
+    url: `http://localhost:${PORT}`,
+    maxClients: 'unlimited (shared tail process)',
+    features: ['IP obfuscation', 'Log broadcasting', 'Compression', 'Graceful shutdown']
   });
+  
+  // Start the tail process immediately when server starts
+  logBroadcaster.startTailProcess();
 });
+
+// Periodic health check and cleanup
+setInterval(() => {
+  // Clean up any closed connections that weren't properly removed
+  const activeBefore = logBroadcaster.clients.size;
+  
+  for (const client of logBroadcaster.clients) {
+    if (client.ws.readyState !== WebSocket.OPEN) {
+      logBroadcaster.clients.delete(client);
+      Logger.debug('Cleaned up closed client connection', {
+        clientAddress: client.clientInfo.remoteAddress,
+        readyState: client.ws.readyState
+      });
+    }
+  }
+  
+  const activeAfter = logBroadcaster.clients.size;
+  const cleaned = activeBefore - activeAfter;
+  
+  if (cleaned > 0 || activeAfter > 0) {
+    Logger.info('Health check completed', {
+      activeClients: activeAfter,
+      cleanedConnections: cleaned,
+      tailProcessActive: logBroadcaster.isStarted,
+      tailPid: logBroadcaster.tail ? logBroadcaster.tail.pid : null
+    });
+  }
+  
+  // Keep tail process running even with no clients for immediate response
+  // when new clients connect
+}, 30000); // Every 30 seconds
