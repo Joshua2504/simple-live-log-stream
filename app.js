@@ -1,4 +1,12 @@
-const ws = new WebSocket('ws://' + window.location.hostname + ':9123');
+// WebSocket connection management
+let ws = null;
+let reconnectAttempts = 0;
+let reconnectTimer = null;
+let isReconnecting = false;
+const MAX_RECONNECT_ATTEMPTS = 10;
+const INITIAL_RECONNECT_DELAY = 1000; // 1 second
+const MAX_RECONNECT_DELAY = 30000; // 30 seconds
+
 const logBox = document.getElementById('logs');
 const filterInput = document.getElementById('filter');
 const statusEl = document.getElementById('status');
@@ -38,11 +46,36 @@ const ClientLogger = {
   debug: function(message, data) { this.log('debug', message, data); }
 };
 
-// Connection status management
-ws.onopen = () => {
+// WebSocket connection and reconnection management
+function createWebSocketConnection() {
+  const wsUrl = 'ws://' + window.location.hostname + ':9123';
+  
+  ClientLogger.info('Creating WebSocket connection', {
+    url: wsUrl,
+    attemptNumber: reconnectAttempts + 1,
+    isReconnecting: isReconnecting
+  });
+  
+  ws = new WebSocket(wsUrl);
+  
+  ws.onopen = handleWebSocketOpen;
+  ws.onclose = handleWebSocketClose;
+  ws.onerror = handleWebSocketError;
+  ws.onmessage = handleWebSocketMessage;
+}
+
+function handleWebSocketOpen() {
   connectionStartTime = Date.now();
   statusEl.textContent = 'Connected';
   statusEl.className = 'status-connected';
+  
+  // Reset reconnection state on successful connection
+  reconnectAttempts = 0;
+  isReconnecting = false;
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
   
   // Initialize log count display
   updateScrollStatus();
@@ -50,11 +83,21 @@ ws.onopen = () => {
   ClientLogger.info('WebSocket connection established', {
     url: ws.url,
     protocol: ws.protocol,
-    readyState: ws.readyState
+    readyState: ws.readyState,
+    wasReconnecting: isReconnecting
   });
-};
+  
+  // Clear existing logs to prepare for server history
+  allLogs = [];
+  filteredLogs = [];
+  pendingMessages = [];
+  
+  // Update display immediately
+  updateLogCount();
+  renderLogs();
+}
 
-ws.onclose = (event) => {
+function handleWebSocketClose(event) {
   const sessionDuration = connectionStartTime ? Date.now() - connectionStartTime : 0;
   statusEl.textContent = 'Disconnected';
   statusEl.className = 'status-disconnected';
@@ -67,42 +110,107 @@ ws.onclose = (event) => {
     messagesReceived: messagesReceived,
     totalBytesReceived: totalBytesReceived
   });
-};
+  
+  // Attempt to reconnect unless it was a clean close or we've exceeded max attempts
+  if (!event.wasClean && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+    attemptReconnection();
+  } else if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+    statusEl.textContent = 'Connection Failed';
+    statusEl.className = 'status-disconnected';
+    ClientLogger.error('Max reconnection attempts reached', {
+      maxAttempts: MAX_RECONNECT_ATTEMPTS,
+      totalAttempts: reconnectAttempts
+    });
+  }
+}
 
-ws.onerror = (error) => {
-  statusEl.textContent = 'Error';
+function handleWebSocketError(error) {
+  statusEl.textContent = 'Connection Error';
   statusEl.className = 'status-disconnected';
   
   ClientLogger.error('WebSocket connection error', {
     error: error,
-    readyState: ws.readyState,
-    url: ws.url
+    readyState: ws ? ws.readyState : 'null',
+    url: ws ? ws.url : 'unknown'
   });
-};
+}
+
+function attemptReconnection() {
+  if (isReconnecting || reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+    return;
+  }
+  
+  isReconnecting = true;
+  reconnectAttempts++;
+  
+  // Calculate exponential backoff delay
+  const baseDelay = INITIAL_RECONNECT_DELAY * Math.pow(2, reconnectAttempts - 1);
+  const delay = Math.min(baseDelay, MAX_RECONNECT_DELAY);
+  
+  statusEl.textContent = `Reconnecting... (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`;
+  statusEl.className = 'status-reconnecting';
+  
+  ClientLogger.info('Attempting to reconnect', {
+    attemptNumber: reconnectAttempts,
+    maxAttempts: MAX_RECONNECT_ATTEMPTS,
+    delayMs: delay
+  });
+  
+  reconnectTimer = setTimeout(() => {
+    if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+      createWebSocketConnection();
+    }
+  }, delay);
+}
 
 // Message batching and rate limiting
-ws.onmessage = (event) => {
+function handleWebSocketMessage(event) {
   const dataSize = new Blob([event.data]).size;
   totalBytesReceived += dataSize;
   messagesReceived++;
   
   const lines = event.data.split('\n').filter(line => line.trim());
-  pendingMessages.push(...lines);
   
-  ClientLogger.debug('WebSocket message received', {
-    messageSize: dataSize,
-    linesCount: lines.length,
-    totalMessages: messagesReceived,
-    totalBytes: totalBytesReceived,
-    pendingMessagesCount: pendingMessages.length
-  });
+  // Check if this looks like a large initial batch (server history)
+  const isLikelyHistoryBatch = lines.length > 100 && allLogs.length === 0;
   
-  // Immediate processing for high-volume scenarios
-  if (!renderTimeout) {
-    const immediateDelay = pendingMessages.length > 100 ? 5 : RENDER_DELAY;
-    renderTimeout = setTimeout(processPendingMessages, immediateDelay);
+  if (isLikelyHistoryBatch) {
+    ClientLogger.info('Received log history from server', {
+      linesCount: lines.length,
+      messageSize: dataSize
+    });
+    
+    // For history, add directly to allLogs without pending queue
+    allLogs.push(...lines);
+    
+    // Ensure we don't exceed MAX_LOGS
+    if (allLogs.length > MAX_LOGS) {
+      allLogs.splice(0, allLogs.length - MAX_LOGS);
+    }
+    
+    // Apply filter and render immediately for history
+    applyFilter();
+    updateLogCount();
+    updateScrollStatus();
+  } else {
+    // Regular streaming logs - use existing pending queue system
+    pendingMessages.push(...lines);
+    
+    ClientLogger.debug('WebSocket message received', {
+      messageSize: dataSize,
+      linesCount: lines.length,
+      totalMessages: messagesReceived,
+      totalBytes: totalBytesReceived,
+      pendingMessagesCount: pendingMessages.length
+    });
+    
+    // Immediate processing for high-volume scenarios
+    if (!renderTimeout) {
+      const immediateDelay = pendingMessages.length > 100 ? 5 : RENDER_DELAY;
+      renderTimeout = setTimeout(processPendingMessages, immediateDelay);
+    }
   }
-};
+}
 
 function processPendingMessages() {
   // If user has scrolled up or manually paused, don't process new messages - just keep them pending
@@ -371,9 +479,11 @@ ClientLogger.info('Live log stream client initialized', {
     width: window.innerWidth,
     height: window.innerHeight
   },
-  url: window.location.href,
-  websocketUrl: ws.url
+  url: window.location.href
 });
+
+// Start initial WebSocket connection
+createWebSocketConnection();
 
 // Performance monitoring
 let lastStatsReport = Date.now();
@@ -417,10 +527,22 @@ document.addEventListener('visibilitychange', () => {
 window.addEventListener('beforeunload', () => {
   const sessionDuration = connectionStartTime ? Date.now() - connectionStartTime : 0;
   
+  // Clear reconnection timer on page unload
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  
+  // Close WebSocket connection cleanly
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.close(1000, 'Page unloading');
+  }
+  
   ClientLogger.info('Page unloading', {
     sessionDuration,
     messagesReceived,
     totalBytesReceived,
-    finalLogsCount: allLogs.length
+    finalLogsCount: allLogs.length,
+    reconnectAttempts: reconnectAttempts
   });
 });

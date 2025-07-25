@@ -108,6 +108,10 @@ class LogBroadcaster {
     this.isStarted = false;
     this.BUFFER_SIZE = 50; // Increased from 5 to 50 for better throughput
     this.BUFFER_DELAY = 50; // Reduced from 100ms to 50ms for faster transmission
+    
+    // Server-side log storage
+    this.storedLogs = [];
+    this.MAX_STORED_LOGS = 500; // Store last 500 logs server-side
   }
 
   addClient(ws, clientInfo) {
@@ -115,8 +119,12 @@ class LogBroadcaster {
     
     Logger.info('Client added to broadcaster', {
       ...clientInfo,
-      totalClients: this.clients.size
+      totalClients: this.clients.size,
+      storedLogsCount: this.storedLogs.length
     });
+
+    // Send stored log history to new client immediately
+    this.sendLogHistoryToClient({ ws, clientInfo, messagesSent: 0, totalBytesSent: 0 });
 
     // Tail process is always running, no need to start it here
   }
@@ -171,8 +179,24 @@ class LogBroadcaster {
         activeClients: this.clients.size
       });
       
-      // Add to buffer instead of sending immediately
-      this.messageBuffer.push(logData);
+      // Store logs server-side for new clients
+      const logLines = logData.split('\n').filter(line => line.trim());
+      const obfuscatedLines = logLines.map(line => obfuscateIPAddresses(line));
+      
+      // Add to stored logs with size limit
+      this.storedLogs.push(...obfuscatedLines);
+      if (this.storedLogs.length > this.MAX_STORED_LOGS) {
+        const excess = this.storedLogs.length - this.MAX_STORED_LOGS;
+        this.storedLogs.splice(0, excess);
+        
+        Logger.debug('Trimmed stored logs', {
+          removedLogs: excess,
+          currentStoredLogs: this.storedLogs.length
+        });
+      }
+      
+      // Add to buffer for broadcasting to existing clients
+      this.messageBuffer.push(...obfuscatedLines);
       
       // Send buffer when it's full or after timeout
       if (this.messageBuffer.length >= this.BUFFER_SIZE) {
@@ -227,6 +251,39 @@ class LogBroadcaster {
     this.isStarted = false;
     this.tail = null;
     this.messageBuffer = [];
+    // Keep stored logs even when tail process stops for immediate client serving
+  }
+
+  sendLogHistoryToClient(client) {
+    if (this.storedLogs.length === 0) {
+      Logger.debug('No stored logs to send to new client', {
+        clientAddress: client.clientInfo.remoteAddress
+      });
+      return;
+    }
+
+    // Send all stored logs as a single batch to the new client
+    const historicalData = this.storedLogs.join('\n');
+    const dataSize = Buffer.byteLength(historicalData, 'utf8');
+    
+    if (client.ws.readyState === WebSocket.OPEN) {
+      try {
+        client.ws.send(historicalData);
+        client.messagesSent += this.storedLogs.length;
+        client.totalBytesSent += dataSize;
+        
+        Logger.info('Log history sent to new client', {
+          clientAddress: client.clientInfo.remoteAddress,
+          logCount: this.storedLogs.length,
+          dataSizeBytes: dataSize
+        });
+      } catch (error) {
+        Logger.error('Failed to send log history to client', {
+          error: error.message,
+          clientAddress: client.clientInfo.remoteAddress
+        });
+      }
+    }
   }
 
   broadcastBufferedMessages() {
@@ -236,17 +293,16 @@ class LogBroadcaster {
     }
 
     const batchedData = this.messageBuffer.join('\n');
-    const obfuscatedData = obfuscateIPAddresses(batchedData);
-    const dataSize = Buffer.byteLength(obfuscatedData, 'utf8');
+    const dataSize = Buffer.byteLength(batchedData, 'utf8');
     
     let successfulSends = 0;
     let failedSends = 0;
 
-    // Broadcast to all connected clients
+    // Broadcast to all connected clients (logs are already obfuscated)
     for (const client of this.clients) {
       if (client.ws.readyState === WebSocket.OPEN) {
         try {
-          client.ws.send(obfuscatedData);
+          client.ws.send(batchedData);
           client.messagesSent += this.messageBuffer.length;
           client.totalBytesSent += dataSize;
           successfulSends++;
@@ -270,7 +326,8 @@ class LogBroadcaster {
       totalClients: this.clients.size,
       successfulSends,
       failedSends,
-      tailPid: this.tail ? this.tail.pid : 'null'
+      tailPid: this.tail ? this.tail.pid : 'null',
+      storedLogsCount: this.storedLogs.length
     });
     
     this.messageBuffer = [];
@@ -361,7 +418,8 @@ server.listen(PORT, () => {
     pid: process.pid,
     url: `http://localhost:${PORT}`,
     maxClients: 'unlimited (shared tail process)',
-    features: ['IP obfuscation', 'Log broadcasting', 'Compression', 'Graceful shutdown']
+    maxStoredLogs: logBroadcaster.MAX_STORED_LOGS,
+    features: ['IP obfuscation', 'Log broadcasting', 'Server-side log storage', 'Instant history delivery', 'Compression', 'Graceful shutdown']
   });
   
   // Start the tail process immediately when server starts
