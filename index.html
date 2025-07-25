@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>Live Log Stream</title>
+  <style>
+    body { 
+      background: #111; 
+      color: #0f0; 
+      font-family: monospace; 
+      padding: 20px;
+      margin: 0;
+    }
+    #filter { 
+      margin-bottom: 10px; 
+      width: 100%; 
+      padding: 5px; 
+      font-size: 16px;
+      box-sizing: border-box;
+    }
+    #logs { 
+      white-space: pre-wrap; 
+      max-height: 90vh; 
+      overflow-y: auto; 
+      border: 1px solid #333; 
+      padding: 10px;
+      /* Performance optimizations */
+      will-change: scroll-position;
+      contain: layout style paint;
+      transform: translateZ(0); /* Force GPU acceleration */
+    }
+    .log-line { 
+      white-space: pre-wrap;
+      /* Reduce reflows */
+      contain: layout style;
+    }
+    .log-error { color: #ff4444; }
+    .log-warning { color: #ffaa00; }
+    .log-info { color: #0f0; }
+    
+    /* Add connection status indicator */
+    #status-container {
+      position: fixed;
+      top: 10px;
+      right: 10px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 12px;
+    }
+    #status {
+      padding: 5px 10px;
+      border-radius: 3px;
+    }
+    #log-count {
+      padding: 5px 10px;
+      border-radius: 3px;
+      background: #333;
+      color: #ccc;
+    }
+    .status-connected { background: #004400; color: #00ff00; }
+    .status-disconnected { background: #440000; color: #ff0000; }
+  </style>
+</head>
+<body>
+  <div id="status-container">
+    <div id="log-count">0 lines</div>
+    <div id="status" class="status-disconnected">Disconnected</div>
+  </div>
+  <h2>📡 Live Plesk Log Stream</h2>
+  <input type="text" id="filter" placeholder="Type to filter logs (e.g. error, GET, 500...)" />
+  <div id="logs"></div>
+  <script src="app.js"></script>
+</body>
+</html>

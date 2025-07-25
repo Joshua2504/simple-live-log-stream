@@ -1,0 +1,9 @@
+version: '3.8'
+
+services:
+  log-stream:
+    build: .
+    volumes:
+      - /mnt/vhosts:/mnt/vhosts:ro
+    ports:
+      - "9123:9123"
