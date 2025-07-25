@@ -106,8 +106,8 @@ class LogBroadcaster {
     this.messageBuffer = [];
     this.bufferTimeout = null;
     this.isStarted = false;
-    this.BUFFER_SIZE = 5;
-    this.BUFFER_DELAY = 100; // ms
+    this.BUFFER_SIZE = 50; // Increased from 5 to 50 for better throughput
+    this.BUFFER_DELAY = 50; // Reduced from 100ms to 50ms for faster transmission
   }
 
   addClient(ws, clientInfo) {

@@ -67,6 +67,19 @@
       color: #ffaa00 !important;
     }
     
+    /* High load indicator styles */
+    .log-count-high-load {
+      background: #004466 !important;
+      color: #00aaff !important;
+      animation: pulse 1s infinite;
+    }
+    
+    @keyframes pulse {
+      0% { opacity: 1; }
+      50% { opacity: 0.7; }
+      100% { opacity: 1; }
+    }
+    
     /* Start/Pause button styles */
     #pause-button {
       padding: 5px 10px;

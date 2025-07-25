@@ -15,9 +15,9 @@ let messagesReceived = 0;
 let totalBytesReceived = 0;
 let userHasScrolledUp = false;
 let manuallyPaused = false; // New variable for manual pause state
-const MAX_LOGS = 1000; // Reduced from 1000
-const BATCH_SIZE = 10;
-const RENDER_DELAY = 100; // ms
+const MAX_LOGS = 2000; // Increased from 1000 for more log history
+const BATCH_SIZE = 50; // Increased from 10 to 50 for faster processing 
+const RENDER_DELAY = 25; // Reduced from 100ms to 25ms for faster response
 
 // Client-side logging utility
 const ClientLogger = {
@@ -97,9 +97,10 @@ ws.onmessage = (event) => {
     pendingMessagesCount: pendingMessages.length
   });
   
-  // Rate limit processing
+  // Immediate processing for high-volume scenarios
   if (!renderTimeout) {
-    renderTimeout = setTimeout(processPendingMessages, RENDER_DELAY);
+    const immediateDelay = pendingMessages.length > 100 ? 5 : RENDER_DELAY;
+    renderTimeout = setTimeout(processPendingMessages, immediateDelay);
   }
 };
 
@@ -115,13 +116,15 @@ function processPendingMessages() {
     return;
   }
   
-  const batch = pendingMessages.splice(0, BATCH_SIZE);
+  // Process larger batches when there are many pending messages
+  const adaptiveBatchSize = pendingMessages.length > 200 ? Math.min(100, pendingMessages.length) : BATCH_SIZE;
+  const batch = pendingMessages.splice(0, adaptiveBatchSize);
   
   batch.forEach(line => {
     allLogs.push(line);
   });
   
-  // Trim logs more aggressively
+  // Trim logs more aggressively when we have too many
   const logsRemoved = Math.max(0, allLogs.length - MAX_LOGS);
   if (allLogs.length > MAX_LOGS) {
     allLogs.splice(0, allLogs.length - MAX_LOGS);
@@ -130,19 +133,29 @@ function processPendingMessages() {
   if (batch.length > 0) {
     ClientLogger.debug('Processed message batch', {
       batchSize: batch.length,
+      adaptiveBatchSize: adaptiveBatchSize,
       totalLogs: allLogs.length,
       logsRemoved: logsRemoved,
       pendingMessages: pendingMessages.length
     });
   }
   
-  applyFilter();
+  // Apply filter and render only when batch processing is complete or every few batches
+  const shouldRender = pendingMessages.length < 50 || batch.length >= 50;
+  if (shouldRender) {
+    applyFilter();
+  }
   
-  // Continue processing if more messages are pending
+  // Continue processing if more messages are pending - use shorter delay for high volume
   if (pendingMessages.length > 0) {
-    renderTimeout = setTimeout(processPendingMessages, RENDER_DELAY);
+    const adaptiveDelay = pendingMessages.length > 100 ? 10 : RENDER_DELAY;
+    renderTimeout = setTimeout(processPendingMessages, adaptiveDelay);
   } else {
     renderTimeout = null;
+    // Ensure final render if we skipped some
+    if (!shouldRender) {
+      applyFilter();
+    }
   }
   
   // Update log count display
@@ -189,10 +202,25 @@ function applyFilter() {
   const keyword = filterInput.value.toLowerCase();
   const startTime = performance.now();
   
-  // Filter logs efficiently
-  filteredLogs = keyword ? 
-    allLogs.filter(line => line.toLowerCase().includes(keyword)) : 
-    [...allLogs];
+  // Skip filtering and rendering if we have too many pending messages (prioritize processing)
+  if (pendingMessages.length > 500) {
+    ClientLogger.debug('Skipping filter during high load', {
+      pendingMessages: pendingMessages.length
+    });
+    return;
+  }
+  
+  // Filter logs efficiently with early termination for performance
+  if (keyword) {
+    filteredLogs = [];
+    for (let i = 0; i < allLogs.length; i++) {
+      if (allLogs[i].toLowerCase().includes(keyword)) {
+        filteredLogs.push(allLogs[i]);
+      }
+    }
+  } else {
+    filteredLogs = [...allLogs];
+  }
   
   const filterTime = performance.now() - startTime;
   
@@ -215,26 +243,27 @@ function renderLogs() {
   // Use document fragment for efficient DOM updates
   const fragment = document.createDocumentFragment();
   
-  // Only render the last N logs to prevent DOM bloat
-  const logsToRender = filteredLogs.slice(-300);
+  // Only render the last N logs to prevent DOM bloat - increased for better UX
+  const logsToRender = filteredLogs.slice(-500); // Increased from 300 to 500
   
   let errorCount = 0;
   let warningCount = 0;
   let infoCount = 0;
   
+  // Use more efficient DOM creation
   logsToRender.forEach(line => {
     const div = document.createElement('div');
-    div.classList.add('log-line');
+    div.className = 'log-line';
 
-    // Optimized regex patterns
+    // Optimized regex patterns with early termination
     if (/\s500\s|fatal|[Ee]rror|php fatal|proxy_error|error_log/.test(line)) {
-      div.classList.add('log-error');
+      div.className += ' log-error';
       errorCount++;
     } else if (/\s4\d\d\s|[Ww]arning|php warning|proxy_warn/.test(line)) {
-      div.classList.add('log-warning');
+      div.className += ' log-warning';
       warningCount++;
     } else if (/\s2\d\d\s|[Ii]nfo|access_log/.test(line)) {
-      div.classList.add('log-info');
+      div.className += ' log-info';
       infoCount++;
     }
 
@@ -242,14 +271,17 @@ function renderLogs() {
     fragment.appendChild(div);
   });
   
-  // Replace all content at once
-  logBox.innerHTML = '';
-  logBox.appendChild(fragment);
-  
-  // Only auto-scroll if user hasn't manually scrolled up
-  if (!userHasScrolledUp) {
-    logBox.scrollTop = logBox.scrollHeight;
-  }
+  // Use requestAnimationFrame for smoother updates during high load
+  requestAnimationFrame(() => {
+    // Replace all content at once
+    logBox.innerHTML = '';
+    logBox.appendChild(fragment);
+    
+    // Only auto-scroll if user hasn't manually scrolled up
+    if (!userHasScrolledUp) {
+      logBox.scrollTop = logBox.scrollHeight;
+    }
+  });
   
   const renderTime = performance.now() - startTime;
   
@@ -265,20 +297,34 @@ function renderLogs() {
 // Function to update log count display
 function updateLogCount() {
   if (logCountEl) {
-    const pausedText = (userHasScrolledUp || manuallyPaused) && pendingMessages.length > 0 ? 
-      ` (${pendingMessages.length} pending)` : '';
-    logCountEl.textContent = `${filteredLogs.length} lines${pausedText}`;
+    const isPending = (userHasScrolledUp || manuallyPaused) && pendingMessages.length > 0;
+    const isHighLoad = pendingMessages.length > 100;
+    
+    let statusText = `${filteredLogs.length} lines`;
+    if (isPending) {
+      statusText += ` (${pendingMessages.length} pending)`;
+    }
+    if (isHighLoad && !isPending) {
+      statusText += ` (⚡ processing ${pendingMessages.length})`;
+    }
+    
+    logCountEl.textContent = statusText;
   }
 }
 
 // Function to update scroll status indicator
 function updateScrollStatus() {
-  // Update visual indicator when logs are paused
+  // Update visual indicator when logs are paused or under high load
   if (logCountEl) {
-    if ((userHasScrolledUp || manuallyPaused) && pendingMessages.length > 0) {
+    const isPending = (userHasScrolledUp || manuallyPaused) && pendingMessages.length > 0;
+    const isHighLoad = pendingMessages.length > 100 && !isPending;
+    
+    logCountEl.classList.remove('log-count-paused', 'log-count-high-load');
+    
+    if (isPending) {
       logCountEl.classList.add('log-count-paused');
-    } else {
-      logCountEl.classList.remove('log-count-paused');
+    } else if (isHighLoad) {
+      logCountEl.classList.add('log-count-high-load');
     }
   }
   updateLogCount();
