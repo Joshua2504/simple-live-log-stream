@@ -14,7 +14,6 @@ const logCountEl = document.getElementById('log-count');
 const pauseButton = document.getElementById('pause-button');
 
 let allLogs = [];
-let filteredLogs = [];
 let pendingMessages = [];
 let renderTimeout = null;
 let filterTimeout = null;
@@ -23,6 +22,7 @@ let messagesReceived = 0;
 let totalBytesReceived = 0;
 let userHasScrolledUp = false;
 let manuallyPaused = false; // New variable for manual pause state
+let currentFilter = ''; // Track current filter for server communication
 const MAX_LOGS = 1000;
 const BATCH_SIZE = 100; // Increased from 10 to 50 for faster processing 
 const RENDER_DELAY = 25; // Reduced from 100ms to 25ms for faster response
@@ -89,8 +89,12 @@ function handleWebSocketOpen() {
   
   // Clear existing logs to prepare for server history
   allLogs = [];
-  filteredLogs = [];
   pendingMessages = [];
+  
+  // Send current filter to server if one exists
+  if (currentFilter) {
+    sendFilterToServer(currentFilter);
+  }
   
   // Update display immediately
   updateLogCount();
@@ -188,8 +192,8 @@ function handleWebSocketMessage(event) {
       allLogs.splice(0, allLogs.length - MAX_LOGS);
     }
     
-    // Apply filter and render immediately for history
-    applyFilter();
+    // Render immediately for history (no client-side filtering needed)
+    renderLogs();
     updateLogCount();
     updateScrollStatus();
   } else {
@@ -251,7 +255,7 @@ function processPendingMessages() {
   // Apply filter and render only when batch processing is complete or every few batches
   const shouldRender = pendingMessages.length < 50 || batch.length >= 50;
   if (shouldRender) {
-    applyFilter();
+    renderLogs(); // No client-side filtering needed - server already filtered
   }
   
   // Continue processing if more messages are pending - use shorter delay for high volume
@@ -262,7 +266,7 @@ function processPendingMessages() {
     renderTimeout = null;
     // Ensure final render if we skipped some
     if (!shouldRender) {
-      applyFilter();
+      renderLogs();
     }
   }
   
@@ -271,7 +275,36 @@ function processPendingMessages() {
   updateScrollStatus();
 }
 
-// Debounced filter input
+// Function to send filter updates to server
+function sendFilterToServer(filterValue) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    currentFilter = filterValue;
+    const message = JSON.stringify({
+      type: 'setFilter',
+      filter: filterValue
+    });
+    
+    try {
+      ws.send(message);
+      ClientLogger.info('Filter sent to server', {
+        filter: filterValue.substring(0, 50),
+        filterLength: filterValue.length
+      });
+    } catch (error) {
+      ClientLogger.error('Failed to send filter to server', {
+        error: error.message,
+        filter: filterValue.substring(0, 50)
+      });
+    }
+  } else {
+    ClientLogger.warn('Cannot send filter - WebSocket not connected', {
+      readyState: ws ? ws.readyState : 'null',
+      filter: filterValue.substring(0, 50)
+    });
+  }
+}
+
+// Debounced filter input - now sends filter to server instead of client-side filtering
 filterInput.addEventListener('input', () => {
   clearTimeout(filterTimeout);
   const filterValue = filterInput.value;
@@ -281,7 +314,7 @@ filterInput.addEventListener('input', () => {
     filterValue: filterValue.substring(0, 50) // Log first 50 chars only
   });
   
-  filterTimeout = setTimeout(applyFilter, 150);
+  filterTimeout = setTimeout(() => sendFilterToServer(filterValue), 300);
 });
 
 // Pause/Resume button functionality
@@ -306,45 +339,6 @@ pauseButton.addEventListener('click', () => {
   updateScrollStatus();
 });
 
-function applyFilter() {
-  const keyword = filterInput.value.toLowerCase();
-  const startTime = performance.now();
-  
-  // Skip filtering and rendering if we have too many pending messages (prioritize processing)
-  if (pendingMessages.length > 500) {
-    ClientLogger.debug('Skipping filter during high load', {
-      pendingMessages: pendingMessages.length
-    });
-    return;
-  }
-  
-  // Filter logs efficiently with early termination for performance
-  if (keyword) {
-    filteredLogs = [];
-    for (let i = 0; i < allLogs.length; i++) {
-      if (allLogs[i].toLowerCase().includes(keyword)) {
-        filteredLogs.push(allLogs[i]);
-      }
-    }
-  } else {
-    filteredLogs = [...allLogs];
-  }
-  
-  const filterTime = performance.now() - startTime;
-  
-  ClientLogger.debug('Filter applied', {
-    keyword: keyword.substring(0, 20), // Log first 20 chars only
-    totalLogs: allLogs.length,
-    filteredLogs: filteredLogs.length,
-    filterTimeMs: filterTime.toFixed(2)
-  });
-  
-  renderLogs();
-  
-  // Update log count display
-  updateLogCount();
-}
-
 function renderLogs() {
   const startTime = performance.now();
   
@@ -352,7 +346,7 @@ function renderLogs() {
   const fragment = document.createDocumentFragment();
   
   // Only render the last N logs to prevent DOM bloat - increased for better UX
-  const logsToRender = filteredLogs.slice(-500); // Increased from 300 to 500
+  const logsToRender = allLogs.slice(-500); // Increased from 300 to 500
   
   let errorCount = 0;
   let warningCount = 0;
@@ -393,12 +387,13 @@ function renderLogs() {
   
   const renderTime = performance.now() - startTime;
   
-  ClientLogger.debug('Logs rendered', {
+  ClientLogger.debug('Logs rendered (server-filtered)', {
     logsRendered: logsToRender.length,
     errorCount,
     warningCount,
     infoCount,
-    renderTimeMs: renderTime.toFixed(2)
+    renderTimeMs: renderTime.toFixed(2),
+    currentFilter: currentFilter.substring(0, 20)
   });
 }
 
@@ -408,7 +403,10 @@ function updateLogCount() {
     const isPending = (userHasScrolledUp || manuallyPaused) && pendingMessages.length > 0;
     const isHighLoad = pendingMessages.length > 100;
     
-    let statusText = `${filteredLogs.length} lines`;
+    let statusText = `${allLogs.length} lines`;
+    if (currentFilter) {
+      statusText += ` (filtered)`;
+    }
     if (isPending) {
       statusText += ` (${pendingMessages.length} pending)`;
     }
@@ -501,8 +499,8 @@ setInterval(() => {
       messagesReceived,
       totalBytesReceived,
       currentLogsCount: allLogs.length,
-      filteredLogsCount: filteredLogs.length,
       pendingMessagesCount: pendingMessages.length,
+      currentFilter: currentFilter.substring(0, 20),
       connectionState: ws.readyState,
       memoryUsage: performance.memory ? {
         used: Math.round(performance.memory.usedJSHeapSize / 1024 / 1024),
@@ -543,6 +541,7 @@ window.addEventListener('beforeunload', () => {
     messagesReceived,
     totalBytesReceived,
     finalLogsCount: allLogs.length,
+    finalFilter: currentFilter.substring(0, 20),
     reconnectAttempts: reconnectAttempts
   });
 });
