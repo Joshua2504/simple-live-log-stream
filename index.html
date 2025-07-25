@@ -4,26 +4,43 @@
   <meta charset="UTF-8" />
   <title>Live Log Stream</title>
   <style>
-    body { 
+    html, body { 
+      height: 100%;
+      margin: 0;
+      padding: 0;
+      overflow: hidden; /* Prevent body scrolling */
       background: #111; 
       color: #0f0; 
       font-family: monospace; 
-      padding: 20px;
-      margin: 0;
     }
+    
+    .container {
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      padding: 20px;
+      box-sizing: border-box;
+    }
+    
+    h2 {
+      margin: 0 0 10px 0;
+      flex-shrink: 0;
+    }
+    
     #filter { 
       margin-bottom: 10px; 
       width: 100%; 
       padding: 5px; 
       font-size: 16px;
       box-sizing: border-box;
+      flex-shrink: 0;
     }
     #logs { 
       white-space: pre-wrap; 
-      max-height: 90vh; 
       overflow-y: auto; 
       border: 1px solid #333; 
       padding: 10px;
+      flex: 1; /* Take remaining space */
       /* Performance optimizations */
       will-change: scroll-position;
       contain: layout style paint;
@@ -110,14 +127,16 @@
   </style>
 </head>
 <body>
-  <div id="status-container">
-    <button id="pause-button">⏸️ Pause</button>
-    <div id="log-count">0 lines</div>
-    <div id="status" class="status-disconnected">Disconnected</div>
+  <div class="container">
+    <div id="status-container">
+      <button id="pause-button">⏸️ Pause</button>
+      <div id="log-count">0 lines</div>
+      <div id="status" class="status-disconnected">Disconnected</div>
+    </div>
+    <h2>📡 Live Plesk Log Stream</h2>
+    <input type="text" id="filter" placeholder="Type to filter logs (e.g. error, GET, 500...)" />
+    <div id="logs"></div>
   </div>
-  <h2>📡 Live Plesk Log Stream</h2>
-  <input type="text" id="filter" placeholder="Type to filter logs (e.g. error, GET, 500...)" />
-  <div id="logs"></div>
   <script src="app.js"></script>
 </body>
 </html>
