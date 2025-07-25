@@ -26,15 +26,6 @@
       margin: 0 0 10px 0;
       flex-shrink: 0;
     }
-    
-    #filter { 
-      margin-bottom: 10px; 
-      width: 100%; 
-      padding: 5px; 
-      font-size: 16px;
-      box-sizing: border-box;
-      flex-shrink: 0;
-    }
     #logs { 
       white-space: pre-wrap; 
       overflow-y: auto; 
@@ -125,62 +116,7 @@
       background: #886600;
     }
     
-    /* Filter buttons styles */
-    .filter-section {
-      margin-bottom: 10px;
-      display: flex;
-      flex-wrap: wrap;
-      gap: 5px;
-      align-items: center;
-    }
-    
-    .filter-group {
-      display: flex;
-      gap: 3px;
-      margin-right: 15px;
-    }
-    
-    .filter-group-label {
-      font-size: 11px;
-      color: #888;
-      margin-right: 5px;
-      align-self: center;
-      white-space: nowrap;
-    }
-    
-    .filter-btn {
-      padding: 3px 8px;
-      border: 1px solid #444;
-      border-radius: 3px;
-      background: #222;
-      color: #ccc;
-      font-family: monospace;
-      font-size: 11px;
-      cursor: pointer;
-      transition: all 0.2s;
-      white-space: nowrap;
-    }
-    
-    .filter-btn:hover {
-      background: #333;
-      border-color: #666;
-    }
-    
-    .filter-btn.active {
-      background: #004400;
-      border-color: #006600;
-      color: #00ff00;
-    }
-    
-    .filter-btn.clear {
-      background: #440000;
-      border-color: #660000;
-      color: #ff4444;
-    }
-    
-    .filter-btn.clear:hover {
-      background: #660000;
-    }
+
     
     .filter-input-container {
       display: flex;
@@ -190,14 +126,14 @@
       margin-bottom: 10px;
     }
     
-    #filter, #text-search {
+    #text-search {
       padding: 5px; 
       font-size: 16px;
       box-sizing: border-box;
       flex-shrink: 0;
     }
     
-    .clear-filter-btn, .clear-search-btn {
+    .clear-search-btn {
       padding: 5px 10px;
       border: none;
       border-radius: 3px;
@@ -210,7 +146,7 @@
       white-space: nowrap;
     }
     
-    .clear-filter-btn:hover, .clear-search-btn:hover {
+    .clear-search-btn:hover {
       background: #660000;
     }
   </style>
@@ -224,55 +160,14 @@
     </div>
     <h2>📡 Live Log Stream</h2>
     
-    <!-- Quick filter buttons -->
-    <div class="filter-section">
-      <div class="filter-group">
-        <span class="filter-group-label">Status:</span>
-        <button class="filter-btn" data-filter="\b[45]\d{2}\b" title="4xx and 5xx status codes">4xx/5xx</button>
-        <button class="filter-btn" data-filter="\b500\b" title="500 Internal Server Error">500</button>
-        <button class="filter-btn" data-filter="\b404\b" title="404 Not Found">404</button>
-        <button class="filter-btn" data-filter="\b403\b" title="403 Forbidden">403</button>
-        <button class="filter-btn" data-filter="\b200\b" title="200 OK">200</button>
-      </div>
-      
-      <div class="filter-group">
-        <span class="filter-group-label">Method:</span>
-        <button class="filter-btn" data-filter="\bGET\b" title="GET requests">GET</button>
-        <button class="filter-btn" data-filter="\bPOST\b" title="POST requests">POST</button>
-        <button class="filter-btn" data-filter="\bPUT\b" title="PUT requests">PUT</button>
-        <button class="filter-btn" data-filter="\bDELETE\b" title="DELETE requests">DELETE</button>
-      </div>
-      
-      <div class="filter-group">
-        <span class="filter-group-label">Level:</span>
-        <button class="filter-btn" data-filter="(?i)\b(error|exception|fatal|critical)\b" title="Error messages">ERROR</button>
-        <button class="filter-btn" data-filter="(?i)\b(warn|warning)\b" title="Warning messages">WARN</button>
-        <button class="filter-btn" data-filter="(?i)\b(info|information)\b" title="Info messages">INFO</button>
-        <button class="filter-btn" data-filter="(?i)\b(debug|trace)\b" title="Debug messages">DEBUG</button>
-      </div>
-      
-      <div class="filter-group">
-        <span class="filter-group-label">Common:</span>
-        <button class="filter-btn" data-filter="(?i)\b(timeout|slow|latency)\b" title="Performance issues">SLOW</button>
-        <button class="filter-btn" data-filter="(?i)\b(auth|login|session)\b" title="Authentication related">AUTH</button>
-        <button class="filter-btn" data-filter="(?i)\b(sql|database|db|query)\b" title="Database related">DB</button>
-      </div>
-    </div>
-    
     <div class="filter-input-container">
       <div style="flex: 1; margin-right: 10px;">
-        <label for="text-search" style="color: #888; font-size: 11px; margin-bottom: 5px; display: block;">Text Search:</label>
+        <label for="text-search" style="color: #888; font-size: 11px; margin-bottom: 5px; display: block;">Search in logs:</label>
         <input type="text" id="text-search" placeholder="Search for text in logs..." style="width: 100%; padding: 5px; font-size: 16px; box-sizing: border-box;" />
       </div>
       
-      <div style="flex: 1; margin-left: 10px;">
-        <label for="filter" style="color: #888; font-size: 11px; margin-bottom: 5px; display: block;">Regex Filter:</label>
-        <input type="text" id="filter" placeholder="Enter regex pattern (e.g. error|GET|500...)" style="width: 100%; padding: 5px; font-size: 16px; box-sizing: border-box;" />
-      </div>
-      
       <div style="display: flex; flex-direction: column; gap: 5px; margin-left: 10px;">
-        <button class="clear-search-btn" id="clear-search">Clear Search</button>
-        <button class="clear-filter-btn" id="clear-filter">Clear All</button>
+        <button class="clear-search-btn" id="clear-search">Clear</button>
       </div>
     </div>
     <div id="logs"></div>

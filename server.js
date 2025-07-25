@@ -112,27 +112,36 @@ class LogBroadcaster {
     // Server-side log storage
     this.storedLogs = [];
     this.MAX_STORED_LOGS = 5000; // Store last 5,000 logs server-side
-    this.CLIENT_HISTORY_LIMIT = 1000; // Send last 1,000 logs to new clients
+    this.CLIENT_HISTORY_LIMIT = 1000; // Send last 1,000 matching logs to new clients (after filtering)
+    
+    // Stats tracking
+    this.stats = {
+      totalMessagesProcessed: 0,
+      totalBytesProcessed: 0,
+      totalClientConnections: 0,
+      totalClientDisconnections: 0,
+      totalMessagesSent: 0,
+      totalBytesSent: 0,
+      lastStatsReset: Date.now()
+    };
+    
+    // Start periodic stats logging
+    this.startStatsReporting();
   }
 
   addClient(ws, clientInfo) {
-    // Store client with filter state
+    // Store client with text search state only
     const clientData = { 
       ws, 
       clientInfo, 
       messagesSent: 0, 
       totalBytesSent: 0,
-      filter: '', // Current filter keyword
-      filterLowerCase: '' // Pre-computed lowercase for performance
+      textSearch: '', // Current text search
+      textSearchLowerCase: '' // Pre-computed lowercase for performance
     };
     
     this.clients.set(ws, clientData);
-    
-    Logger.info('Client added to broadcaster', {
-      ...clientInfo,
-      totalClients: this.clients.size,
-      storedLogsCount: this.storedLogs.length
-    });
+    this.stats.totalClientConnections++;
 
     // Send stored log history to new client immediately
     this.sendLogHistoryToClient(clientData);
@@ -144,19 +153,7 @@ class LogBroadcaster {
     // Find and remove the client
     const client = this.clients.get(ws);
     if (client) {
-      const sessionStats = {
-        totalMessagesSent: client.messagesSent,
-        totalBytesSent: client.totalBytesSent,
-        sessionDuration: Date.now() - new Date(clientInfo.connectionTime).getTime(),
-        finalFilter: client.filter
-      };
-
-      Logger.info('Client removed from broadcaster', {
-        ...clientInfo,
-        ...sessionStats,
-        remainingClients: this.clients.size - 1
-      });
-
+      this.stats.totalClientDisconnections++;
       this.clients.delete(ws);
     }
 
@@ -185,11 +182,6 @@ class LogBroadcaster {
         const excess = this.storedLogs.length - this.MAX_STORED_LOGS;
         this.storedLogs.splice(0, excess);
       }
-      
-      Logger.info('Initial log history loaded', {
-        linesLoaded: obfuscatedLines.length,
-        totalStoredLogs: this.storedLogs.length
-      });
     });
 
     initialRead.on('close', () => {
@@ -200,37 +192,24 @@ class LogBroadcaster {
 
       this.isStarted = true;
 
-      Logger.info('Global log tail process started', { 
-        command: 'tail -f -n 0 with find (live logs only)',
-        pid: this.tail.pid,
-        clientCount: this.clients.size,
-        preloadedLogs: this.storedLogs.length
-      });
-
       this.tail.stdout.on('data', (data) => {
         const logData = data.toString().trim();
         if (!logData) return;
         
-        Logger.debug('Raw log data received for broadcast', { 
-          dataLength: logData.length,
-          pid: this.tail.pid,
-          activeClients: this.clients.size
-        });
+        // Update stats
+        this.stats.totalBytesProcessed += Buffer.byteLength(logData);
         
         // Store logs server-side for new clients
         const logLines = logData.split('\n').filter(line => line.trim());
         const obfuscatedLines = logLines.map(line => obfuscateIPAddresses(line));
+        
+        this.stats.totalMessagesProcessed += obfuscatedLines.length;
         
         // Add to stored logs with size limit
         this.storedLogs.push(...obfuscatedLines);
         if (this.storedLogs.length > this.MAX_STORED_LOGS) {
           const excess = this.storedLogs.length - this.MAX_STORED_LOGS;
           this.storedLogs.splice(0, excess);
-          
-          Logger.debug('Trimmed stored logs', {
-            removedLogs: excess,
-            currentStoredLogs: this.storedLogs.length
-          });
         }
         
         // Add to buffer for broadcasting to existing clients
@@ -282,38 +261,34 @@ class LogBroadcaster {
 
     if (!this.tail.killed) {
       this.tail.kill();
-      Logger.info('Global tail process stopped - no clients remaining', { 
-        pid: this.tail.pid 
-      });
     }
 
     this.isStarted = false;
     this.tail = null;
     this.messageBuffer = [];
+    this.stopStatsReporting();
     // Keep stored logs even when tail process stops for immediate client serving
   }
 
   sendLogHistoryToClient(client) {
     if (this.storedLogs.length === 0) {
-      Logger.debug('No stored logs to send to new client', {
-        clientAddress: client.clientInfo.remoteAddress
-      });
       return;
     }
 
-    // Send only the last 1,000 logs (or all available if less than 1,000)
-    const logsToSend = this.storedLogs.slice(-this.CLIENT_HISTORY_LIMIT);
-    
-    // Apply server-side filtering
-    const filteredLogs = this.filterLogsForClient(client, logsToSend);
+    // If there's a text search filter, we need to search through more logs
+    // to find up to 1,000 matching results
+    let filteredLogs;
+    if (client.textSearch) {
+      // Filter all stored logs first, then take the last 1,000 matches
+      const allFilteredLogs = this.filterLogsForClient(client, this.storedLogs);
+      filteredLogs = allFilteredLogs.slice(-this.CLIENT_HISTORY_LIMIT);
+    } else {
+      // No filter - send the last 1,000 logs (or all available if less than 1,000)
+      const logsToSend = this.storedLogs.slice(-this.CLIENT_HISTORY_LIMIT);
+      filteredLogs = this.filterLogsForClient(client, logsToSend);
+    }
     
     if (filteredLogs.length === 0) {
-      Logger.debug('No logs match client filter', {
-        clientAddress: client.clientInfo.remoteAddress,
-        filter: client.filter.substring(0, 20),
-        totalAvailableLogs: logsToSend.length
-      });
-      
       // Send empty response to signal history is complete
       if (client.ws.readyState === WebSocket.OPEN) {
         try {
@@ -337,16 +312,9 @@ class LogBroadcaster {
         client.messagesSent += filteredLogs.length;
         client.totalBytesSent += dataSize;
         
-        Logger.info('Filtered log history sent to client', {
-          clientAddress: client.clientInfo.remoteAddress,
-          logCount: filteredLogs.length,
-          originalLogCount: logsToSend.length,
-          totalStoredLogs: this.storedLogs.length,
-          dataSizeBytes: dataSize,
-          historyLimit: this.CLIENT_HISTORY_LIMIT,
-          filter: client.filter.substring(0, 20),
-          filterEfficiency: `${((1 - filteredLogs.length / logsToSend.length) * 100).toFixed(1)}% reduction`
-        });
+        // Update stats
+        this.stats.totalMessagesSent += filteredLogs.length;
+        this.stats.totalBytesSent += dataSize;
       } catch (error) {
         Logger.error('Failed to send filtered log history to client', {
           error: error.message,
@@ -356,22 +324,16 @@ class LogBroadcaster {
     }
   }
 
-  updateClientFilter(ws, filterKeyword) {
+  updateClientTextSearch(ws, textSearch) {
     const client = this.clients.get(ws);
     if (client) {
-      const oldFilter = client.filter;
-      client.filter = filterKeyword || '';
-      client.filterLowerCase = client.filter.toLowerCase();
+      const oldTextSearch = client.textSearch;
       
-      Logger.info('Client filter updated', {
-        clientAddress: client.clientInfo.remoteAddress,
-        oldFilter: oldFilter.substring(0, 20),
-        newFilter: client.filter.substring(0, 20),
-        filterLength: client.filter.length
-      });
+      client.textSearch = textSearch || '';
+      client.textSearchLowerCase = client.textSearch.toLowerCase();
       
-      // Only send filtered history if filter actually changed
-      if (oldFilter !== client.filter) {
+      // Only send filtered history if text search actually changed
+      if (oldTextSearch !== client.textSearch) {
         this.sendLogHistoryToClient(client);
       }
       
@@ -382,48 +344,17 @@ class LogBroadcaster {
 
   // Apply server-side filtering to log lines
   filterLogsForClient(client, logLines) {
-    if (!client.filter) {
-      return logLines; // No filter, return all logs
-    }
+    let filtered = logLines;
     
-    const filtered = [];
-    
-    // Check if the filter looks like a regex pattern
-    // Include word boundaries (\b) and character classes (like \d) as regex patterns
-    const isRegexPattern = /[\\()\[\]{}^$*+?|]/.test(client.filter) || 
-                          client.filter.includes('\\b') || 
-                          client.filter.includes('\\d') ||
-                          client.filter.includes('(?i)');
-    
-    if (isRegexPattern) {
-      try {
-        // Try to use as regex pattern
-        const regex = new RegExp(client.filter, 'i'); // Case insensitive
-        for (const line of logLines) {
-          if (regex.test(line)) {
-            filtered.push(line);
-          }
-        }
-      } catch (error) {
-        // If regex is invalid, fall back to simple string matching
-        Logger.warn('Invalid regex pattern, falling back to string matching', {
-          filter: client.filter.substring(0, 50),
-          error: error.message
-        });
-        
-        for (const line of logLines) {
-          if (line.toLowerCase().includes(client.filterLowerCase)) {
-            filtered.push(line);
-          }
+    // Apply text search filter if present
+    if (client.textSearch) {
+      const textSearchFiltered = [];
+      for (const line of filtered) {
+        if (line.toLowerCase().includes(client.textSearchLowerCase)) {
+          textSearchFiltered.push(line);
         }
       }
-    } else {
-      // Use simple string matching for non-regex patterns
-      for (const line of logLines) {
-        if (line.toLowerCase().includes(client.filterLowerCase)) {
-          filtered.push(line);
-        }
-      }
+      filtered = textSearchFiltered;
     }
     
     return filtered;
@@ -436,9 +367,7 @@ class LogBroadcaster {
     }
 
     let successfulSends = 0;
-    let failedSends = 0;
-    let totalOriginalBytes = 0;
-    let totalFilteredBytes = 0;
+    let totalBytesSent = 0;
 
     // Apply per-client filtering and send individually
     for (const [ws, client] of this.clients) {
@@ -455,45 +384,62 @@ class LogBroadcaster {
             client.messagesSent += filteredLogs.length;
             client.totalBytesSent += filteredDataSize;
             
-            totalFilteredBytes += filteredDataSize;
+            totalBytesSent += filteredDataSize;
+            successfulSends++;
           }
-          
-          const originalDataSize = Buffer.byteLength(this.messageBuffer.join('\n'), 'utf8');
-          totalOriginalBytes += originalDataSize;
-          
-          successfulSends++;
         } catch (error) {
           Logger.error('Failed to send filtered logs to client', {
             error: error.message,
-            clientAddress: client.clientInfo.remoteAddress,
-            filter: client.filter.substring(0, 20)
+            clientAddress: client.clientInfo.remoteAddress
           });
-          failedSends++;
         }
-      } else {
-        // Client connection is closed, will be cleaned up elsewhere
-        failedSends++;
       }
     }
 
-    // Enhanced logging with filtering metrics
-    const filterEfficiency = totalOriginalBytes > 0 ? 
-      ((1 - totalFilteredBytes / (totalOriginalBytes || 1)) * 100).toFixed(1) : 0;
-
-    Logger.debug('Filtered log batch broadcast to clients', {
-      linesInBatch: this.messageBuffer.length,
-      originalBatchSizeBytes: Buffer.byteLength(this.messageBuffer.join('\n'), 'utf8'),
-      totalFilteredBytes: totalFilteredBytes,
-      filterEfficiency: `${filterEfficiency}% reduction`,
-      totalClients: this.clients.size,
-      successfulSends,
-      failedSends,
-      tailPid: this.tail ? this.tail.pid : 'null',
-      storedLogsCount: this.storedLogs.length
-    });
+    // Update stats
+    this.stats.totalMessagesSent += this.messageBuffer.length * successfulSends;
+    this.stats.totalBytesSent += totalBytesSent;
     
     this.messageBuffer = [];
     this.bufferTimeout = null;
+  }
+
+  startStatsReporting() {
+    this.statsInterval = setInterval(() => {
+      const now = Date.now();
+      const timeSinceLastReset = now - this.stats.lastStatsReset;
+      const secondsElapsed = timeSinceLastReset / 1000;
+      
+      // Only log if there's activity or clients connected
+      if (this.clients.size > 0 || this.stats.totalMessagesProcessed > 0) {
+        Logger.info('Periodic stats report', {
+          activeClients: this.clients.size,
+          storedLogsCount: this.storedLogs.length,
+          messagesProcessedRate: Math.round(this.stats.totalMessagesProcessed / secondsElapsed * 10) / 10,
+          bytesProcessedRate: Math.round(this.stats.totalBytesProcessed / secondsElapsed / 1024 * 10) / 10, // KB/s
+          totalConnections: this.stats.totalClientConnections,
+          totalDisconnections: this.stats.totalClientDisconnections,
+          messagesSentRate: Math.round(this.stats.totalMessagesSent / secondsElapsed * 10) / 10,
+          bytesSentRate: Math.round(this.stats.totalBytesSent / secondsElapsed / 1024 * 10) / 10, // KB/s
+          tailProcessActive: this.isStarted,
+          uptimeSeconds: Math.round(secondsElapsed)
+        });
+      }
+      
+      // Reset counters for next period
+      this.stats.totalMessagesProcessed = 0;
+      this.stats.totalBytesProcessed = 0;
+      this.stats.totalMessagesSent = 0;
+      this.stats.totalBytesSent = 0;
+      this.stats.lastStatsReset = now;
+    }, 5000); // Every 5 seconds
+  }
+
+  stopStatsReporting() {
+    if (this.statsInterval) {
+      clearInterval(this.statsInterval);
+      this.statsInterval = null;
+    }
   }
 }
 
@@ -522,44 +468,25 @@ wss.on('connection', function connection(ws, req) {
   // Add client to the global broadcaster
   logBroadcaster.addClient(ws, clientInfo);
 
-  // Handle messages from client (filter updates)
+  // Handle messages from client (text search updates only)
   ws.on('message', (message) => {
     try {
       const data = JSON.parse(message);
       
-      if (data.type === 'setFilter') {
-        // Validate filter value
-        const filterValue = typeof data.filter === 'string' ? data.filter.trim() : '';
-        const success = logBroadcaster.updateClientFilter(ws, filterValue);
-        
-        if (!success) {
-          Logger.warn('Failed to update filter for unknown client', {
-            clientAddress: clientInfo.remoteAddress,
-            filter: filterValue.substring(0, 20)
-          });
-        }
-      } else {
-        Logger.warn('Unknown message type from client', {
-          type: data.type,
-          clientAddress: clientInfo.remoteAddress
-        });
+      if (data.type === 'setTextSearch') {
+        // Handle text search message
+        const textSearchValue = typeof data.value === 'string' ? data.value.trim() : '';
+        logBroadcaster.updateClientTextSearch(ws, textSearchValue);
       }
     } catch (error) {
       Logger.error('Invalid message from client', {
         error: error.message,
-        clientAddress: clientInfo.remoteAddress,
-        message: message.toString().substring(0, 100)
+        clientAddress: clientInfo.remoteAddress
       });
     }
   });
 
   ws.on('close', (code, reason) => {
-    Logger.info('WebSocket client disconnected', {
-      ...clientInfo,
-      closeCode: code,
-      closeReason: reason
-    });
-    
     // Remove client from broadcaster
     logBroadcaster.removeClient(ws, clientInfo);
   });
@@ -631,7 +558,7 @@ setInterval(() => {
       Logger.debug('Cleaned up closed client connection', {
         clientAddress: client.clientInfo.remoteAddress,
         readyState: ws.readyState,
-        filter: client.filter.substring(0, 20)
+        textSearch: client.textSearch.substring(0, 20)
       });
     }
   }
