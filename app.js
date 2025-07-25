@@ -307,6 +307,9 @@ function sendFilterToServer(filterValue) {
       
       // Clear the log display immediately
       renderLogs();
+      
+      // Update button states
+      updateFilterButtonStates();
     } catch (error) {
       ClientLogger.error('Failed to send filter to server', {
         error: error.message,
@@ -332,7 +335,55 @@ filterInput.addEventListener('input', () => {
   });
   
   filterTimeout = setTimeout(() => sendFilterToServer(filterValue), 300);
+  updateFilterButtonStates();
 });
+
+// Handle predefined filter buttons
+document.addEventListener('DOMContentLoaded', () => {
+  const filterButtons = document.querySelectorAll('.filter-btn');
+  const clearFilterBtn = document.getElementById('clear-filter');
+  
+  filterButtons.forEach(button => {
+    button.addEventListener('click', () => {
+      const filterValue = button.getAttribute('data-filter');
+      const isActive = button.classList.contains('active');
+      
+      if (isActive) {
+        // If button is active, clear the filter
+        clearAllFilters();
+      } else {
+        // Apply the filter
+        filterInput.value = filterValue;
+        sendFilterToServer(filterValue);
+        updateFilterButtonStates();
+      }
+    });
+  });
+  
+  clearFilterBtn.addEventListener('click', () => {
+    clearAllFilters();
+  });
+});
+
+function clearAllFilters() {
+  filterInput.value = '';
+  sendFilterToServer('');
+  updateFilterButtonStates();
+}
+
+function updateFilterButtonStates() {
+  const currentFilter = filterInput.value;
+  const filterButtons = document.querySelectorAll('.filter-btn');
+  
+  filterButtons.forEach(button => {
+    const buttonFilter = button.getAttribute('data-filter');
+    if (currentFilter === buttonFilter) {
+      button.classList.add('active');
+    } else {
+      button.classList.remove('active');
+    }
+  });
+}
 
 // Pause/Resume button functionality
 pauseButton.addEventListener('click', () => {

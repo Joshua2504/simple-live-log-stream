@@ -387,9 +387,42 @@ class LogBroadcaster {
     }
     
     const filtered = [];
-    for (const line of logLines) {
-      if (line.toLowerCase().includes(client.filterLowerCase)) {
-        filtered.push(line);
+    
+    // Check if the filter looks like a regex pattern
+    // Include word boundaries (\b) and character classes (like \d) as regex patterns
+    const isRegexPattern = /[\\()\[\]{}^$*+?|]/.test(client.filter) || 
+                          client.filter.includes('\\b') || 
+                          client.filter.includes('\\d') ||
+                          client.filter.includes('(?i)');
+    
+    if (isRegexPattern) {
+      try {
+        // Try to use as regex pattern
+        const regex = new RegExp(client.filter, 'i'); // Case insensitive
+        for (const line of logLines) {
+          if (regex.test(line)) {
+            filtered.push(line);
+          }
+        }
+      } catch (error) {
+        // If regex is invalid, fall back to simple string matching
+        Logger.warn('Invalid regex pattern, falling back to string matching', {
+          filter: client.filter.substring(0, 50),
+          error: error.message
+        });
+        
+        for (const line of logLines) {
+          if (line.toLowerCase().includes(client.filterLowerCase)) {
+            filtered.push(line);
+          }
+        }
+      }
+    } else {
+      // Use simple string matching for non-regex patterns
+      for (const line of logLines) {
+        if (line.toLowerCase().includes(client.filterLowerCase)) {
+          filtered.push(line);
+        }
       }
     }
     
