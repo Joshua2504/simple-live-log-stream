@@ -23,6 +23,7 @@ let totalBytesReceived = 0;
 let userHasScrolledUp = false;
 let manuallyPaused = false; // New variable for manual pause state
 let currentFilter = ''; // Track current filter for server communication
+let filterJustApplied = false; // Flag to track when a new filter was just applied
 const MAX_LOGS = 1000;
 const BATCH_SIZE = 100; // Increased from 10 to 50 for faster processing 
 const RENDER_DELAY = 25; // Reduced from 100ms to 25ms for faster response
@@ -218,7 +219,8 @@ function handleWebSocketMessage(event) {
 
 function processPendingMessages() {
   // If user has scrolled up or manually paused, don't process new messages - just keep them pending
-  if (userHasScrolledUp || manuallyPaused) {
+  // EXCEPTION: If a filter was just applied, process the filtered results immediately
+  if ((userHasScrolledUp || manuallyPaused) && !filterJustApplied) {
     const reason = manuallyPaused ? 'manually paused' : 'user scrolled up';
     ClientLogger.debug(`Log processing paused - ${reason}`, {
       pendingMessagesCount: pendingMessages.length
@@ -235,6 +237,12 @@ function processPendingMessages() {
   batch.forEach(line => {
     allLogs.push(line);
   });
+  
+  // Clear the filterJustApplied flag after processing the first batch of filtered results
+  if (filterJustApplied) {
+    filterJustApplied = false;
+    ClientLogger.info('Processed first batch of filtered results');
+  }
   
   // Trim logs more aggressively when we have too many
   const logsRemoved = Math.max(0, allLogs.length - MAX_LOGS);
@@ -279,6 +287,12 @@ function processPendingMessages() {
 function sendFilterToServer(filterValue) {
   if (ws && ws.readyState === WebSocket.OPEN) {
     currentFilter = filterValue;
+    
+    // Clear existing logs and set flag when applying a new filter
+    allLogs = [];
+    pendingMessages = [];
+    filterJustApplied = true;
+    
     const message = JSON.stringify({
       type: 'setFilter',
       filter: filterValue
@@ -290,6 +304,9 @@ function sendFilterToServer(filterValue) {
         filter: filterValue.substring(0, 50),
         filterLength: filterValue.length
       });
+      
+      // Clear the log display immediately
+      renderLogs();
     } catch (error) {
       ClientLogger.error('Failed to send filter to server', {
         error: error.message,
