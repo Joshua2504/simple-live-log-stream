@@ -106,12 +106,13 @@ class LogBroadcaster {
     this.messageBuffer = [];
     this.bufferTimeout = null;
     this.isStarted = false;
-    this.BUFFER_SIZE = 50; // Increased from 5 to 50 for better throughput
+    this.BUFFER_SIZE = 100; // Increased from 5 to 50 for better throughput
     this.BUFFER_DELAY = 50; // Reduced from 100ms to 50ms for faster transmission
     
     // Server-side log storage
     this.storedLogs = [];
-    this.MAX_STORED_LOGS = 500; // Store last 500 logs server-side
+    this.MAX_STORED_LOGS = 5000; // Store last 5,000 logs server-side
+    this.CLIENT_HISTORY_LIMIT = 1000; // Send last 1,000 logs to new clients
   }
 
   addClient(ws, clientInfo) {
@@ -157,81 +158,110 @@ class LogBroadcaster {
   startTailProcess() {
     if (this.isStarted) return;
 
-    this.tail = spawn('bash', ['-c',
-      `find /mnt/vhosts/*/logs/ -type f ! -name "*.gz" -exec tail -f -n 0 {} + | ts '[%Y-%m-%d %H:%M:%S]'`
+    // First, read the last 5000 lines from existing log files to populate stored logs
+    const initialRead = spawn('bash', ['-c',
+      `find /mnt/vhosts/*/logs/ -type f ! -name "*.gz" -exec tail -n 100 {} + | tail -n ${this.MAX_STORED_LOGS} | ts '[%Y-%m-%d %H:%M:%S]'`
     ]);
 
-    this.isStarted = true;
-
-    Logger.info('Global log tail process started', { 
-      command: 'tail -f -n 0 with find (live logs only)',
-      pid: this.tail.pid,
-      clientCount: this.clients.size
-    });
-
-    this.tail.stdout.on('data', (data) => {
+    initialRead.stdout.on('data', (data) => {
       const logData = data.toString().trim();
       if (!logData) return;
       
-      Logger.debug('Raw log data received for broadcast', { 
-        dataLength: logData.length,
-        pid: this.tail.pid,
-        activeClients: this.clients.size
-      });
-      
-      // Store logs server-side for new clients
       const logLines = logData.split('\n').filter(line => line.trim());
       const obfuscatedLines = logLines.map(line => obfuscateIPAddresses(line));
       
-      // Add to stored logs with size limit
+      // Add to stored logs
       this.storedLogs.push(...obfuscatedLines);
       if (this.storedLogs.length > this.MAX_STORED_LOGS) {
         const excess = this.storedLogs.length - this.MAX_STORED_LOGS;
         this.storedLogs.splice(0, excess);
+      }
+      
+      Logger.info('Initial log history loaded', {
+        linesLoaded: obfuscatedLines.length,
+        totalStoredLogs: this.storedLogs.length
+      });
+    });
+
+    initialRead.on('close', () => {
+      // Now start the live tail process
+      this.tail = spawn('bash', ['-c',
+        `find /mnt/vhosts/*/logs/ -type f ! -name "*.gz" -exec tail -f -n 0 {} + | ts '[%Y-%m-%d %H:%M:%S]'`
+      ]);
+
+      this.isStarted = true;
+
+      Logger.info('Global log tail process started', { 
+        command: 'tail -f -n 0 with find (live logs only)',
+        pid: this.tail.pid,
+        clientCount: this.clients.size,
+        preloadedLogs: this.storedLogs.length
+      });
+
+      this.tail.stdout.on('data', (data) => {
+        const logData = data.toString().trim();
+        if (!logData) return;
         
-        Logger.debug('Trimmed stored logs', {
-          removedLogs: excess,
-          currentStoredLogs: this.storedLogs.length
+        Logger.debug('Raw log data received for broadcast', { 
+          dataLength: logData.length,
+          pid: this.tail.pid,
+          activeClients: this.clients.size
         });
-      }
-      
-      // Add to buffer for broadcasting to existing clients
-      this.messageBuffer.push(...obfuscatedLines);
-      
-      // Send buffer when it's full or after timeout
-      if (this.messageBuffer.length >= this.BUFFER_SIZE) {
-        clearTimeout(this.bufferTimeout);
-        this.broadcastBufferedMessages();
-      } else if (!this.bufferTimeout) {
-        this.bufferTimeout = setTimeout(() => this.broadcastBufferedMessages(), this.BUFFER_DELAY);
-      }
-    });
-
-    this.tail.stderr.on('data', (data) => {
-      Logger.error('Global log stream error from tail process', { 
-        error: data.toString(),
-        pid: this.tail.pid,
-        clientCount: this.clients.size
+        
+        // Store logs server-side for new clients
+        const logLines = logData.split('\n').filter(line => line.trim());
+        const obfuscatedLines = logLines.map(line => obfuscateIPAddresses(line));
+        
+        // Add to stored logs with size limit
+        this.storedLogs.push(...obfuscatedLines);
+        if (this.storedLogs.length > this.MAX_STORED_LOGS) {
+          const excess = this.storedLogs.length - this.MAX_STORED_LOGS;
+          this.storedLogs.splice(0, excess);
+          
+          Logger.debug('Trimmed stored logs', {
+            removedLogs: excess,
+            currentStoredLogs: this.storedLogs.length
+          });
+        }
+        
+        // Add to buffer for broadcasting to existing clients
+        this.messageBuffer.push(...obfuscatedLines);
+        
+        // Send buffer when it's full or after timeout
+        if (this.messageBuffer.length >= this.BUFFER_SIZE) {
+          clearTimeout(this.bufferTimeout);
+          this.broadcastBufferedMessages();
+        } else if (!this.bufferTimeout) {
+          this.bufferTimeout = setTimeout(() => this.broadcastBufferedMessages(), this.BUFFER_DELAY);
+        }
       });
-    });
 
-    this.tail.on('close', (code, signal) => {
-      Logger.warn('Global log tail process closed', { 
-        code, 
-        signal, 
-        pid: this.tail.pid,
-        clientCount: this.clients.size
+      this.tail.stderr.on('data', (data) => {
+        Logger.error('Global log stream error from tail process', { 
+          error: data.toString(),
+          pid: this.tail.pid,
+          clientCount: this.clients.size
+        });
       });
-      this.isStarted = false;
-    });
 
-    this.tail.on('error', (error) => {
-      Logger.error('Global log tail process error', { 
-        error: error.message,
-        pid: this.tail.pid,
-        clientCount: this.clients.size
+      this.tail.on('close', (code, signal) => {
+        Logger.warn('Global log tail process closed', { 
+          code, 
+          signal, 
+          pid: this.tail.pid,
+          clientCount: this.clients.size
+        });
+        this.isStarted = false;
       });
-      this.isStarted = false;
+
+      this.tail.on('error', (error) => {
+        Logger.error('Global log tail process error', { 
+          error: error.message,
+          pid: this.tail.pid,
+          clientCount: this.clients.size
+        });
+        this.isStarted = false;
+      });
     });
   }
 
@@ -262,20 +292,23 @@ class LogBroadcaster {
       return;
     }
 
-    // Send all stored logs as a single batch to the new client
-    const historicalData = this.storedLogs.join('\n');
+    // Send only the last 1,000 logs (or all available if less than 1,000)
+    const logsToSend = this.storedLogs.slice(-this.CLIENT_HISTORY_LIMIT);
+    const historicalData = logsToSend.join('\n');
     const dataSize = Buffer.byteLength(historicalData, 'utf8');
     
     if (client.ws.readyState === WebSocket.OPEN) {
       try {
         client.ws.send(historicalData);
-        client.messagesSent += this.storedLogs.length;
+        client.messagesSent += logsToSend.length;
         client.totalBytesSent += dataSize;
         
         Logger.info('Log history sent to new client', {
           clientAddress: client.clientInfo.remoteAddress,
-          logCount: this.storedLogs.length,
-          dataSizeBytes: dataSize
+          logCount: logsToSend.length,
+          totalStoredLogs: this.storedLogs.length,
+          dataSizeBytes: dataSize,
+          historyLimit: this.CLIENT_HISTORY_LIMIT
         });
       } catch (error) {
         Logger.error('Failed to send log history to client', {
@@ -419,6 +452,7 @@ server.listen(PORT, () => {
     url: `http://localhost:${PORT}`,
     maxClients: 'unlimited (shared tail process)',
     maxStoredLogs: logBroadcaster.MAX_STORED_LOGS,
+    clientHistoryLimit: logBroadcaster.CLIENT_HISTORY_LIMIT,
     features: ['IP obfuscation', 'Log broadcasting', 'Server-side log storage', 'Instant history delivery', 'Compression', 'Graceful shutdown']
   });
   

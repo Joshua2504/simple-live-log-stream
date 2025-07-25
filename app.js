@@ -23,8 +23,8 @@ let messagesReceived = 0;
 let totalBytesReceived = 0;
 let userHasScrolledUp = false;
 let manuallyPaused = false; // New variable for manual pause state
-const MAX_LOGS = 500; // Increased from 1000 for more log history
-const BATCH_SIZE = 50; // Increased from 10 to 50 for faster processing 
+const MAX_LOGS = 1000;
+const BATCH_SIZE = 100; // Increased from 10 to 50 for faster processing 
 const RENDER_DELAY = 25; // Reduced from 100ms to 25ms for faster response
 
 // Client-side logging utility
