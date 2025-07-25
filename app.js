@@ -375,13 +375,13 @@ function renderLogs() {
     div.className = 'log-line';
 
     // Optimized regex patterns with early termination
-    if (/\s500\s|fatal|[Ee]rror|php fatal|proxy_error|error_log/.test(line)) {
+    if (/\s500\s|fatal|[Ee]rror|error_log|ERROR|FATAL/.test(line)) {
       div.className += ' log-error';
       errorCount++;
-    } else if (/\s4\d\d\s|[Ww]arning|php warning|proxy_warn/.test(line)) {
+    } else if (/\s4\d\d\s|[Ww]arning|WARN|WARNING/.test(line)) {
       div.className += ' log-warning';
       warningCount++;
-    } else if (/\s2\d\d\s|[Ii]nfo|access_log/.test(line)) {
+    } else if (/\s2\d\d\s|[Ii]nfo|INFO|access_log/.test(line)) {
       div.className += ' log-info';
       infoCount++;
     }

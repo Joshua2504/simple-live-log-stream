@@ -1,7 +1,7 @@
 {
-  "name": "live-log-stream-simple",
+  "name": "live-log-viewer",
   "version": "1.0.0",
-  "description": "A simple live log streaming application using WebSockets",
+  "description": "A simple live log viewing application using WebSockets",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
