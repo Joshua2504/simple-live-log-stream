@@ -74,25 +74,15 @@ function obfuscateIPAddresses(logData) {
 }
 
 const server = http.createServer((req, res) => {
-  Logger.debug('HTTP request received', { 
-    method: req.method, 
-    url: req.url, 
-    userAgent: req.headers['user-agent'],
-    remoteAddress: req.connection.remoteAddress 
-  });
-  
   if (req.url === '/') {
     const file = path.join(__dirname, 'index.html');
-    Logger.debug('Serving index.html');
     res.setHeader('Content-Type', 'text/html');
     fs.createReadStream(file).pipe(res);
   } else if (req.url === '/app.js') {
     const file = path.join(__dirname, 'app.js');
-    Logger.debug('Serving app.js');
     res.setHeader('Content-Type', 'application/javascript');
     fs.createReadStream(file).pipe(res);
   } else {
-    Logger.warn('404 - File not found', { url: req.url });
     res.writeHead(404);
     res.end();
   }
@@ -225,11 +215,14 @@ class LogBroadcaster {
       });
 
       this.tail.stderr.on('data', (data) => {
-        Logger.error('Global log stream error from tail process', { 
-          error: data.toString(),
-          pid: this.tail.pid,
-          clientCount: this.clients.size
-        });
+        // Only log critical errors, not routine stderr output
+        const errorText = data.toString();
+        if (errorText.includes('No such file') || errorText.includes('Permission denied') || errorText.includes('fatal')) {
+          Logger.error('Critical tail process error', { 
+            error: errorText,
+            pid: this.tail.pid
+          });
+        }
       });
 
       this.tail.on('close', (code, signal) => {
@@ -294,10 +287,7 @@ class LogBroadcaster {
         try {
           client.ws.send('');
         } catch (error) {
-          Logger.error('Failed to send empty response to client', {
-            error: error.message,
-            clientAddress: client.clientInfo.remoteAddress
-          });
+          // Silent fail for empty response
         }
       }
       return;
@@ -388,10 +378,14 @@ class LogBroadcaster {
             successfulSends++;
           }
         } catch (error) {
-          Logger.error('Failed to send filtered logs to client', {
-            error: error.message,
-            clientAddress: client.clientInfo.remoteAddress
-          });
+          // Only log repeated client send failures if they're different errors
+          if (error.message !== client.lastErrorMessage) {
+            Logger.error('Failed to send filtered logs to client', {
+              error: error.message,
+              clientAddress: client.clientInfo.remoteAddress
+            });
+            client.lastErrorMessage = error.message;
+          }
         }
       }
     }
@@ -462,8 +456,6 @@ wss.on('connection', function connection(ws, req) {
     userAgent: req.headers['user-agent'],
     connectionTime: new Date().toISOString()
   };
-  
-  Logger.info('WebSocket client connected', clientInfo);
 
   // Add client to the global broadcaster
   logBroadcaster.addClient(ws, clientInfo);
@@ -555,19 +547,15 @@ setInterval(() => {
   for (const [ws, client] of logBroadcaster.clients) {
     if (ws.readyState !== WebSocket.OPEN) {
       logBroadcaster.clients.delete(ws);
-      Logger.debug('Cleaned up closed client connection', {
-        clientAddress: client.clientInfo.remoteAddress,
-        readyState: ws.readyState,
-        textSearch: client.textSearch.substring(0, 20)
-      });
     }
   }
   
   const activeAfter = logBroadcaster.clients.size;
   const cleaned = activeBefore - activeAfter;
   
-  if (cleaned > 0 || activeAfter > 0) {
-    Logger.info('Health check completed', {
+  // Only log health check if there were issues or significant activity
+  if (cleaned > 0) {
+    Logger.info('Health check - cleaned up connections', {
       activeClients: activeAfter,
       cleanedConnections: cleaned,
       tailProcessActive: logBroadcaster.isStarted,
