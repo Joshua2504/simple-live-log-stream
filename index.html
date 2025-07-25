@@ -60,10 +60,40 @@
     }
     .status-connected { background: #004400; color: #00ff00; }
     .status-disconnected { background: #440000; color: #ff0000; }
+    
+    /* Pause indicator styles */
+    .log-count-paused {
+      background: #664400 !important;
+      color: #ffaa00 !important;
+    }
+    
+    /* Start/Pause button styles */
+    #pause-button {
+      padding: 5px 10px;
+      border: none;
+      border-radius: 3px;
+      background: #006600;
+      color: #00ff00;
+      font-family: monospace;
+      font-size: 12px;
+      cursor: pointer;
+      transition: background-color 0.2s;
+    }
+    #pause-button:hover {
+      background: #008800;
+    }
+    #pause-button.paused {
+      background: #664400;
+      color: #ffaa00;
+    }
+    #pause-button.paused:hover {
+      background: #886600;
+    }
   </style>
 </head>
 <body>
   <div id="status-container">
+    <button id="pause-button">⏸️ Pause</button>
     <div id="log-count">0 lines</div>
     <div id="status" class="status-disconnected">Disconnected</div>
   </div>

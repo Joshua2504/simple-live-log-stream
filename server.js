@@ -125,11 +125,11 @@ wss.on('connection', function connection(ws, req) {
   const BUFFER_DELAY = 100; // ms
 
   const tail = spawn('bash', ['-c',
-    `find /mnt/vhosts/*/logs/ -type f ! -name "*.gz" -exec tail -F {} + | ts '[%Y-%m-%d %H:%M:%S]'`
+    `find /mnt/vhosts/*/logs/ -type f ! -name "*.gz" -exec tail -f -n 0 {} + | ts '[%Y-%m-%d %H:%M:%S]'`
   ]);
 
   Logger.info('Log tail process started', { 
-    command: 'tail -F with find',
+    command: 'tail -f -n 0 with find (live logs only)',
     pid: tail.pid 
   });
 

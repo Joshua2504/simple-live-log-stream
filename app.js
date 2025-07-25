@@ -3,6 +3,7 @@ const logBox = document.getElementById('logs');
 const filterInput = document.getElementById('filter');
 const statusEl = document.getElementById('status');
 const logCountEl = document.getElementById('log-count');
+const pauseButton = document.getElementById('pause-button');
 
 let allLogs = [];
 let filteredLogs = [];
@@ -13,6 +14,7 @@ let connectionStartTime = null;
 let messagesReceived = 0;
 let totalBytesReceived = 0;
 let userHasScrolledUp = false;
+let manuallyPaused = false; // New variable for manual pause state
 const MAX_LOGS = 500; // Reduced from 1000
 const BATCH_SIZE = 10;
 const RENDER_DELAY = 50; // ms
@@ -43,7 +45,7 @@ ws.onopen = () => {
   statusEl.className = 'status-connected';
   
   // Initialize log count display
-  updateLogCount();
+  updateScrollStatus();
   
   ClientLogger.info('WebSocket connection established', {
     url: ws.url,
@@ -102,6 +104,17 @@ ws.onmessage = (event) => {
 };
 
 function processPendingMessages() {
+  // If user has scrolled up or manually paused, don't process new messages - just keep them pending
+  if (userHasScrolledUp || manuallyPaused) {
+    const reason = manuallyPaused ? 'manually paused' : 'user scrolled up';
+    ClientLogger.debug(`Log processing paused - ${reason}`, {
+      pendingMessagesCount: pendingMessages.length
+    });
+    renderTimeout = null;
+    updateScrollStatus();
+    return;
+  }
+  
   const batch = pendingMessages.splice(0, BATCH_SIZE);
   
   batch.forEach(line => {
@@ -134,6 +147,7 @@ function processPendingMessages() {
   
   // Update log count display
   updateLogCount();
+  updateScrollStatus();
 }
 
 // Debounced filter input
@@ -147,6 +161,28 @@ filterInput.addEventListener('input', () => {
   });
   
   filterTimeout = setTimeout(applyFilter, 150);
+});
+
+// Pause/Resume button functionality
+pauseButton.addEventListener('click', () => {
+  manuallyPaused = !manuallyPaused;
+  
+  if (manuallyPaused) {
+    pauseButton.textContent = '▶️ Resume';
+    pauseButton.classList.add('paused');
+    ClientLogger.info('Log processing manually paused');
+  } else {
+    pauseButton.textContent = '⏸️ Pause';
+    pauseButton.classList.remove('paused');
+    ClientLogger.info('Log processing manually resumed');
+    
+    // Resume processing if there are pending messages
+    if (pendingMessages.length > 0 && !renderTimeout) {
+      renderTimeout = setTimeout(processPendingMessages, RENDER_DELAY);
+    }
+  }
+  
+  updateScrollStatus();
 });
 
 function applyFilter() {
@@ -229,22 +265,57 @@ function renderLogs() {
 // Function to update log count display
 function updateLogCount() {
   if (logCountEl) {
-    logCountEl.textContent = `${filteredLogs.length} lines`;
+    const pausedText = (userHasScrolledUp || manuallyPaused) && pendingMessages.length > 0 ? 
+      ` (${pendingMessages.length} pending)` : '';
+    logCountEl.textContent = `${filteredLogs.length} lines${pausedText}`;
   }
+}
+
+// Function to update scroll status indicator
+function updateScrollStatus() {
+  // Update visual indicator when logs are paused
+  if (logCountEl) {
+    if ((userHasScrolledUp || manuallyPaused) && pendingMessages.length > 0) {
+      logCountEl.classList.add('log-count-paused');
+    } else {
+      logCountEl.classList.remove('log-count-paused');
+    }
+  }
+  updateLogCount();
 }
 
 // Detect user scrolling to prevent auto-scroll
 logBox.addEventListener('scroll', () => {
   const isAtBottom = logBox.scrollTop + logBox.clientHeight >= logBox.scrollHeight - 5;
+  const wasScrolledUp = userHasScrolledUp;
   userHasScrolledUp = !isAtBottom;
   
-  ClientLogger.debug('User scroll detected', {
-    scrollTop: logBox.scrollTop,
-    clientHeight: logBox.clientHeight,
-    scrollHeight: logBox.scrollHeight,
-    isAtBottom,
-    userHasScrolledUp
-  });
+  // If user just scrolled back to bottom and there are pending messages, resume processing (only if not manually paused)
+  if (wasScrolledUp && !userHasScrolledUp && !manuallyPaused && pendingMessages.length > 0) {
+    ClientLogger.info('User scrolled to bottom - resuming log processing', {
+      pendingMessagesCount: pendingMessages.length
+    });
+    
+    // Resume processing pending messages
+    if (!renderTimeout) {
+      renderTimeout = setTimeout(processPendingMessages, RENDER_DELAY);
+    }
+  }
+  
+  // Update status when scroll state changes
+  if (wasScrolledUp !== userHasScrolledUp) {
+    updateScrollStatus();
+    
+    ClientLogger.debug('Scroll state changed', {
+      scrollTop: logBox.scrollTop,
+      clientHeight: logBox.clientHeight,
+      scrollHeight: logBox.scrollHeight,
+      isAtBottom,
+      userHasScrolledUp,
+      manuallyPaused,
+      pendingMessages: pendingMessages.length
+    });
+  }
 });
 
 // Initialize client-side logging and performance monitoring
