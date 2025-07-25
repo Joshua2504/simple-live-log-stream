@@ -15,9 +15,9 @@ let messagesReceived = 0;
 let totalBytesReceived = 0;
 let userHasScrolledUp = false;
 let manuallyPaused = false; // New variable for manual pause state
-const MAX_LOGS = 500; // Reduced from 1000
+const MAX_LOGS = 1000; // Reduced from 1000
 const BATCH_SIZE = 10;
-const RENDER_DELAY = 50; // ms
+const RENDER_DELAY = 100; // ms
 
 // Client-side logging utility
 const ClientLogger = {
