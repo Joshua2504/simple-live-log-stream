@@ -9,6 +9,7 @@ const MAX_RECONNECT_DELAY = 30000; // 30 seconds
 
 const logBox = document.getElementById('logs');
 const filterInput = document.getElementById('filter');
+const textSearchInput = document.getElementById('text-search');
 const statusEl = document.getElementById('status');
 const logCountEl = document.getElementById('log-count');
 const pauseButton = document.getElementById('pause-button');
@@ -17,14 +18,17 @@ let allLogs = [];
 let pendingMessages = [];
 let renderTimeout = null;
 let filterTimeout = null;
+let searchTimeout = null;
 let connectionStartTime = null;
 let messagesReceived = 0;
 let totalBytesReceived = 0;
 let userHasScrolledUp = false;
 let manuallyPaused = false; // New variable for manual pause state
-let currentFilter = ''; // Track current filter for server communication
+let currentFilter = ''; // Track current regex filter for server communication
+let currentTextSearch = ''; // Track current text search for client-side filtering
+let activeFilterButtons = new Set(); // Track active predefined filters
 let filterJustApplied = false; // Flag to track when a new filter was just applied
-const MAX_LOGS = 1000;
+const MAX_LOGS = 2000; // Increased to store more logs so we can display 1000 filtered results
 const BATCH_SIZE = 100; // Increased from 10 to 50 for faster processing 
 const RENDER_DELAY = 25; // Reduced from 100ms to 25ms for faster response
 
@@ -324,60 +328,143 @@ function sendFilterToServer(filterValue) {
   }
 }
 
-// Debounced filter input - now sends filter to server instead of client-side filtering
+// Simplified function to combine predefined filters only
+function buildCombinedFilter() {
+  const predefinedFilters = Array.from(activeFilterButtons);
+  
+  // Simple approach: just combine predefined filters with OR logic
+  if (predefinedFilters.length > 0) {
+    return `(${predefinedFilters.join('|')})`;
+  }
+  
+  // If no predefined filters, use whatever is in the filter input
+  const filterValue = filterInput.value.trim();
+  return filterValue;
+}
+
+// Simplified function to update the filter input field to show the combined filter
+function updateFilterInput() {
+  const predefinedFilters = Array.from(activeFilterButtons);
+  
+  // Build a clean combined filter from scratch
+  let combinedFilter = '';
+  
+  // Add predefined filters as a single OR group
+  if (predefinedFilters.length > 0) {
+    combinedFilter = `(${predefinedFilters.join('|')})`;
+  }
+  
+  // Update the filter input with the combined filter
+  filterInput.value = combinedFilter;
+  
+  ClientLogger.debug('Filter input updated', {
+    predefinedFiltersCount: predefinedFilters.length,
+    combinedFilter: combinedFilter.substring(0, 50)
+  });
+}
+
+// Simplified filter input event handler
 filterInput.addEventListener('input', () => {
   clearTimeout(filterTimeout);
-  const filterValue = filterInput.value;
+  
+  const filterValue = filterInput.value.trim();
+  
+  // If the user manually types in the filter input, clear predefined buttons
+  // Check if this is user input vs programmatic update
+  const now = Date.now();
+  const timeSinceLastButtonClick = now - (window.lastFilterButtonClick || 0);
+  
+  // If it's been more than 100ms since a button click, assume it's manual editing
+  if (timeSinceLastButtonClick > 100 && activeFilterButtons.size > 0) {
+    // User is manually editing - clear predefined filters
+    activeFilterButtons.clear();
+    updateFilterButtonStates();
+  }
   
   ClientLogger.debug('Filter input changed', {
     filterLength: filterValue.length,
-    filterValue: filterValue.substring(0, 50) // Log first 50 chars only
+    filterValue: filterValue.substring(0, 50),
+    activeFiltersCount: activeFilterButtons.size,
+    timeSinceButtonClick: timeSinceLastButtonClick
   });
   
   filterTimeout = setTimeout(() => sendFilterToServer(filterValue), 300);
-  updateFilterButtonStates();
+});
+
+// Debounced text search input - client-side filtering
+textSearchInput.addEventListener('input', () => {
+  clearTimeout(searchTimeout);
+  const searchValue = textSearchInput.value;
+  
+  ClientLogger.debug('Text search input changed', {
+    searchLength: searchValue.length,
+    searchValue: searchValue.substring(0, 50)
+  });
+  
+  searchTimeout = setTimeout(() => {
+    currentTextSearch = searchValue.toLowerCase();
+    renderLogs(); // Re-render with new text search filter
+  }, 300);
 });
 
 // Handle predefined filter buttons
 document.addEventListener('DOMContentLoaded', () => {
   const filterButtons = document.querySelectorAll('.filter-btn');
   const clearFilterBtn = document.getElementById('clear-filter');
+  const clearSearchBtn = document.getElementById('clear-search');
   
   filterButtons.forEach(button => {
     button.addEventListener('click', () => {
+      // Track when a button was clicked to distinguish from manual input
+      window.lastFilterButtonClick = Date.now();
+      
       const filterValue = button.getAttribute('data-filter');
       const isActive = button.classList.contains('active');
       
       if (isActive) {
-        // If button is active, clear the filter
-        clearAllFilters();
+        // Remove from active filters
+        activeFilterButtons.delete(filterValue);
+        button.classList.remove('active');
       } else {
-        // Apply the filter
-        filterInput.value = filterValue;
-        sendFilterToServer(filterValue);
-        updateFilterButtonStates();
+        // Add to active filters
+        activeFilterButtons.add(filterValue);
+        button.classList.add('active');
       }
+      
+      // Update the filter input to show the combined pattern
+      updateFilterInput();
+      
+      // Send combined filter to server
+      const combinedFilter = buildCombinedFilter();
+      sendFilterToServer(combinedFilter);
     });
   });
   
   clearFilterBtn.addEventListener('click', () => {
     clearAllFilters();
   });
+  
+  clearSearchBtn.addEventListener('click', () => {
+    textSearchInput.value = '';
+    currentTextSearch = '';
+    renderLogs(); // Re-render without text search filter
+  });
 });
 
 function clearAllFilters() {
   filterInput.value = '';
+  activeFilterButtons.clear();
+  currentFilter = '';
   sendFilterToServer('');
   updateFilterButtonStates();
 }
 
 function updateFilterButtonStates() {
-  const currentFilter = filterInput.value;
   const filterButtons = document.querySelectorAll('.filter-btn');
   
   filterButtons.forEach(button => {
     const buttonFilter = button.getAttribute('data-filter');
-    if (currentFilter === buttonFilter) {
+    if (activeFilterButtons.has(buttonFilter)) {
       button.classList.add('active');
     } else {
       button.classList.remove('active');
@@ -413,15 +500,21 @@ function renderLogs() {
   // Use document fragment for efficient DOM updates
   const fragment = document.createDocumentFragment();
   
-  // Only render the last N logs to prevent DOM bloat - increased for better UX
-  const logsToRender = allLogs.slice(-500); // Increased from 300 to 500
+  // Apply client-side text search filtering if needed
+  let logsToProcess = allLogs.slice(-1000); // Take last 1000 logs (increased from 500)
+  
+  if (currentTextSearch) {
+    logsToProcess = logsToProcess.filter(line => 
+      line.toLowerCase().includes(currentTextSearch)
+    );
+  }
   
   let errorCount = 0;
   let warningCount = 0;
   let infoCount = 0;
   
   // Use more efficient DOM creation
-  logsToRender.forEach(line => {
+  logsToProcess.forEach(line => {
     const div = document.createElement('div');
     div.className = 'log-line';
 
@@ -437,7 +530,15 @@ function renderLogs() {
       infoCount++;
     }
 
-    div.textContent = line;
+    // Highlight search terms in the text
+    if (currentTextSearch) {
+      const regex = new RegExp(`(${currentTextSearch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi');
+      const highlightedText = line.replace(regex, '<mark style="background: #ffff00; color: #000;">$1</mark>');
+      div.innerHTML = highlightedText;
+    } else {
+      div.textContent = line;
+    }
+    
     fragment.appendChild(div);
   });
   
@@ -455,13 +556,16 @@ function renderLogs() {
   
   const renderTime = performance.now() - startTime;
   
-  ClientLogger.debug('Logs rendered (server-filtered)', {
-    logsRendered: logsToRender.length,
+  ClientLogger.debug('Logs rendered', {
+    totalLogs: allLogs.length,
+    logsDisplayed: logsToProcess.length,
     errorCount,
     warningCount,
     infoCount,
     renderTimeMs: renderTime.toFixed(2),
-    currentFilter: currentFilter.substring(0, 20)
+    currentFilter: currentFilter.substring(0, 20),
+    currentTextSearch: currentTextSearch.substring(0, 20),
+    activeFilters: Array.from(activeFilterButtons).length
   });
 }
 
@@ -472,14 +576,35 @@ function updateLogCount() {
     const isHighLoad = pendingMessages.length > 100;
     
     let statusText = `${allLogs.length} lines`;
-    if (currentFilter) {
-      statusText += ` (filtered)`;
+    
+    // Show filter info
+    if (currentFilter || activeFilterButtons.size > 0) {
+      const filterCount = activeFilterButtons.size;
+      const filterValue = filterInput.value.trim();
+      const hasManualFilter = filterValue && filterValue.length > 0;
+      
+      if (filterCount > 0 && hasManualFilter) {
+        statusText += ` (${filterCount} filters + regex)`;
+      } else if (filterCount > 0) {
+        statusText += ` (${filterCount} filter${filterCount > 1 ? 's' : ''})`;
+      } else if (hasManualFilter) {
+        statusText += ` (regex filtered)`;
+      }
     }
+    
+    // Show text search info
+    if (currentTextSearch) {
+      const searchDisplay = currentTextSearch.length > 10 ? 
+        currentTextSearch.substring(0, 10) + '...' : 
+        currentTextSearch;
+      statusText += ` [search: "${searchDisplay}"]`;
+    }
+    
     if (isPending) {
       statusText += ` (${pendingMessages.length} pending)`;
     }
     if (isHighLoad && !isPending) {
-      statusText += ` (⚡ processing ${pendingMessages.length})`;
+      statusText += ` (processing ${pendingMessages.length})`;
     }
     
     logCountEl.textContent = statusText;

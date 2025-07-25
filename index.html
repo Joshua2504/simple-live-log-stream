@@ -185,15 +185,19 @@
     .filter-input-container {
       display: flex;
       gap: 5px;
-      align-items: center;
+      align-items: flex-end;
       width: 100%;
+      margin-bottom: 10px;
     }
     
-    #filter {
-      flex: 1;
+    #filter, #text-search {
+      padding: 5px; 
+      font-size: 16px;
+      box-sizing: border-box;
+      flex-shrink: 0;
     }
     
-    .clear-filter-btn {
+    .clear-filter-btn, .clear-search-btn {
       padding: 5px 10px;
       border: none;
       border-radius: 3px;
@@ -206,7 +210,7 @@
       white-space: nowrap;
     }
     
-    .clear-filter-btn:hover {
+    .clear-filter-btn:hover, .clear-search-btn:hover {
       background: #660000;
     }
   </style>
@@ -256,8 +260,20 @@
     </div>
     
     <div class="filter-input-container">
-      <input type="text" id="filter" placeholder="Type to filter logs on server (e.g. error, GET, 500...)" />
-      <button class="clear-filter-btn" id="clear-filter">Clear</button>
+      <div style="flex: 1; margin-right: 10px;">
+        <label for="text-search" style="color: #888; font-size: 11px; margin-bottom: 5px; display: block;">Text Search:</label>
+        <input type="text" id="text-search" placeholder="Search for text in logs..." style="width: 100%; padding: 5px; font-size: 16px; box-sizing: border-box;" />
+      </div>
+      
+      <div style="flex: 1; margin-left: 10px;">
+        <label for="filter" style="color: #888; font-size: 11px; margin-bottom: 5px; display: block;">Regex Filter:</label>
+        <input type="text" id="filter" placeholder="Enter regex pattern (e.g. error|GET|500...)" style="width: 100%; padding: 5px; font-size: 16px; box-sizing: border-box;" />
+      </div>
+      
+      <div style="display: flex; flex-direction: column; gap: 5px; margin-left: 10px;">
+        <button class="clear-search-btn" id="clear-search">Clear Search</button>
+        <button class="clear-filter-btn" id="clear-filter">Clear All</button>
+      </div>
     </div>
     <div id="logs"></div>
   </div>
